@@ -97,13 +97,36 @@ func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 		}
 		value, release, err := service.Authenticate(c.Request.Context(), raw)
 		if err != nil {
-			writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
+			writeClientAuthError(c, err)
 			return
 		}
 		defer release()
 		c.Set(ClientKey, value)
 		c.Next()
 	}
+}
+
+func writeClientAuthError(c *gin.Context, err error) {
+	if imageClientCapacityRefusal(c.Request.URL.Path, err) {
+		c.Header("X-Upstream-Request-Disposition", "not-submitted")
+		writeOpenAIError(
+			c,
+			http.StatusServiceUnavailable,
+			"upstream_not_submitted",
+			"Image request was refused before provider submission.",
+		)
+		return
+	}
+	writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
+}
+
+func imageClientCapacityRefusal(path string, err error) bool {
+	if path != "/v1/images/generations" && path != "/v1/images/edits" {
+		return false
+	}
+	return errors.Is(err, clientkeyapp.ErrRateLimited) ||
+		errors.Is(err, clientkeyapp.ErrConcurrencyLimit) ||
+		errors.Is(err, clientkeyapp.ErrBillingLimit)
 }
 
 func bearerToken(header string) (string, bool) {

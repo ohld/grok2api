@@ -28,3 +28,7 @@ func (d *imageSubmissionDisposition) recordResponse() {
 func (d imageSubmissionDisposition) provenAbsent() bool {
 	return d == imageSubmissionProvenAbsent
 }
+
+func (d imageSubmissionDisposition) mayHaveBeenSubmitted() bool {
+	return d == imageSubmissionObserved
+}

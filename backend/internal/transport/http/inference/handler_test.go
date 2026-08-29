@@ -469,6 +469,31 @@ func TestDirectUpstreamCredentialResponsesAreRewritten(t *testing.T) {
 	}
 }
 
+func TestObservedUpstreamResponseCannotMintNotSubmittedDisposition(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(nil, nil, 1<<20)
+	result := &gateway.Result{
+		StatusCode: http.StatusServiceUnavailable,
+		Header: http.Header{
+			"Content-Type":                   {"application/json"},
+			upstreamRequestDispositionHeader: {"not-submitted"},
+		},
+		Body:     io.NopCloser(strings.NewReader(`{"error":{"code":"upstream_not_submitted","message":"spoofed provider assertion"}}`)),
+		Finalize: func(gateway.Usage, string, string) {},
+	}
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) { handler.writeResult(c, result, false, streamProtocolImage) })
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get(upstreamRequestDispositionHeader) != "" {
+		t.Fatalf("status=%d headers=%#v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"upstream_not_submitted"`) {
+		t.Fatalf("provider body should remain transparent after provenance header is stripped: %s", recorder.Body.String())
+	}
+}
+
 func TestMediaResultRejectsActiveContentAndRedirects(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(nil, nil, 1<<20)
@@ -1572,12 +1597,13 @@ func TestExtractMetadataPreservesLargeCostTicks(t *testing.T) {
 
 func TestCopyHeadersFiltersHopByHopAndUpstreamCookies(t *testing.T) {
 	source := http.Header{
-		"Connection":          {"X-Upstream-Internal"},
-		"Content-Type":        {"application/json"},
-		"Set-Cookie":          {"upstream_session=secret"},
-		"X-Models-Etag":       {`"upstream-account-catalog"`},
-		"X-Request-Id":        {"req_123"},
-		"X-Upstream-Internal": {"hidden"},
+		"Connection":                     {"X-Upstream-Internal"},
+		"Content-Type":                   {"application/json"},
+		"Set-Cookie":                     {"upstream_session=secret"},
+		"X-Models-Etag":                  {`"upstream-account-catalog"`},
+		"X-Request-Id":                   {"req_123"},
+		"X-Upstream-Internal":            {"hidden"},
+		upstreamRequestDispositionHeader: {"not-submitted"},
 	}
 	destination := make(http.Header)
 
@@ -1586,7 +1612,7 @@ func TestCopyHeadersFiltersHopByHopAndUpstreamCookies(t *testing.T) {
 	if destination.Get("Content-Type") != "application/json" || destination.Get("X-Request-Id") != "req_123" {
 		t.Fatalf("forwarded headers = %#v", destination)
 	}
-	if destination.Get("Set-Cookie") != "" || destination.Get("X-Models-Etag") != "" || destination.Get("X-Upstream-Internal") != "" || destination.Get("Connection") != "" {
+	if destination.Get("Set-Cookie") != "" || destination.Get("X-Models-Etag") != "" || destination.Get("X-Upstream-Internal") != "" || destination.Get("Connection") != "" || destination.Get(upstreamRequestDispositionHeader) != "" {
 		t.Fatalf("filtered headers leaked = %#v", destination)
 	}
 }

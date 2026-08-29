@@ -226,6 +226,32 @@ func TestImageAllPreSubmissionFailuresReturnExplicitSentinel(t *testing.T) {
 	}
 }
 
+func TestImageInitialSelectionFailureReturnsExplicitNotSubmittedSentinel(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSafeFailoverImageFixture(t, []uint64{11}, nil, nil)
+	cooldownUntil := time.Now().UTC().Add(time.Minute)
+	credential := fixture.credentials[0]
+	if err := fixture.accountRepo.UpdateHealth(
+		ctx,
+		credential.ID,
+		credential.Provider,
+		1,
+		&cooldownUntil,
+		"test selector cooling",
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.generate(ctx, "req-image-selection-not-submitted")
+	if !errors.Is(err, ErrUpstreamNotSubmitted) {
+		t.Fatalf("selection error = %v, want ErrUpstreamNotSubmitted", err)
+	}
+	if attempts := fixture.adapter.Attempts(); len(attempts) != 0 {
+		t.Fatalf("attempts = %#v, want no provider submission", attempts)
+	}
+}
+
 func TestImageAmbiguousFailureDoesNotFailOverOrClaimNotSubmitted(t *testing.T) {
 	ctx := context.Background()
 	fixture := newSafeFailoverImageFixture(t, []uint64{11, 12}, nil, map[uint64]bool{11: true})
