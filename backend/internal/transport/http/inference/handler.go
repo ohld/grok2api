@@ -2153,6 +2153,9 @@ func copyHeaders(destination, source http.Header) {
 		"connection": {}, "content-length": {}, "keep-alive": {}, "proxy-authenticate": {},
 		"proxy-authorization": {}, "set-cookie": {}, "te": {}, "trailer": {},
 		"transfer-encoding": {}, "upgrade": {}, "x-models-etag": {},
+		// This is a local provenance assertion consumed by downstream failover.
+		// An observed upstream response must never be able to mint it.
+		strings.ToLower(upstreamRequestDispositionHeader): {},
 	}
 	for _, value := range source.Values("Connection") {
 		for name := range strings.SplitSeq(value, ",") {

@@ -213,7 +213,7 @@ func (s *Service) executeImage(
 			lease, err = selection.Acquire(ctx, excluded, false)
 		}
 		if err != nil {
-			if submissionDisposition.provenAbsent() {
+			if !submissionDisposition.mayHaveBeenSubmitted() {
 				writeFailureAudit(http.StatusServiceUnavailable, "upstream_not_submitted", lastCredentialFailure)
 				return nil, fmt.Errorf("%w: %w", ErrUpstreamNotSubmitted, err)
 			}
