@@ -22,6 +22,8 @@ const SchemaVersion = "grok-image-capacity-attestation-v2"
 
 const CoverageOperation = "image_generation"
 
+const RetryPolicy = "image_pre_submit_cross_egress_v1"
+
 const (
 	identitySetHashDomain   = "grok2api-image-identity-set-v1"
 	routeTopologyHashDomain = "grok2api-image-route-topology-v1"
@@ -45,7 +47,12 @@ type routeReader interface {
 }
 
 type candidateProjector interface {
-	EligibleAccountIDsForKey(context.Context, account.Provider, uint64, string, string, clientkeydomain.AccountScope) ([]uint64, error)
+	ImageCapacityEligibilityForKey(context.Context, account.Provider, uint64, string, string, clientkeydomain.AccountScope) ([]uint64, []uint64, bool, error)
+	ImageCapacityFairnessPolicy() string
+}
+
+type routingPolicyReader interface {
+	ImageCapacityMaxAttempts() int
 }
 
 type quotaModeResolver interface {
@@ -77,6 +84,13 @@ type CoverageAttestation struct {
 	TerminalSuccessCount                int64     `json:"terminalSuccessCount"`
 }
 
+type RoutingAttestation struct {
+	RetryPolicy         string `json:"retryPolicy"`
+	MaxAttempts         int    `json:"maxAttempts"`
+	EligibleEgressCount int    `json:"eligibleEgressCount"`
+	FairnessPolicy      string `json:"fairnessPolicy"`
+}
+
 type Attestation struct {
 	SchemaVersion                  string                `json:"schemaVersion"`
 	ObservedAt                     time.Time             `json:"observedAt"`
@@ -84,6 +98,7 @@ type Attestation struct {
 	Route                          RouteAttestation      `json:"route"`
 	EligibleImageIdentityCount     int                   `json:"eligibleImageIdentityCount"`
 	EligibleImageIdentitySetSHA256 string                `json:"eligibleImageIdentitySetSha256"`
+	Routing                        RoutingAttestation    `json:"routing"`
 	Build                          buildinfo.Attestation `json:"build"`
 	Coverage                       *CoverageAttestation  `json:"coverage,omitempty"`
 }
@@ -93,13 +108,14 @@ type Service struct {
 	routes     routeReader
 	quotaModes quotaModeResolver
 	candidates candidateProjector
+	routing    routingPolicyReader
 	coverage   repository.SuccessfulImageCoverageRepository
 	now        func() time.Time
 	build      func() (buildinfo.Attestation, error)
 }
 
-func NewService(keys keyReader, routes routeReader, quotaModes quotaModeResolver, candidates candidateProjector, coverage repository.SuccessfulImageCoverageRepository) *Service {
-	return &Service{keys: keys, routes: routes, quotaModes: quotaModes, candidates: candidates, coverage: coverage, now: time.Now, build: buildinfo.CurrentAttestation}
+func NewService(keys keyReader, routes routeReader, quotaModes quotaModeResolver, candidates candidateProjector, routing routingPolicyReader, coverage repository.SuccessfulImageCoverageRepository) *Service {
+	return &Service{keys: keys, routes: routes, quotaModes: quotaModes, candidates: candidates, routing: routing, coverage: coverage, now: time.Now, build: buildinfo.CurrentAttestation}
 }
 
 func (s *Service) Attest(ctx context.Context, request Request) (Attestation, error) {
@@ -135,11 +151,17 @@ func (s *Service) Attest(ctx context.Context, request Request) (Attestation, err
 	if quotaMode != account.QuotaModeWebImagePro {
 		return Attestation{}, ErrRouteNotAttestable
 	}
-	eligibleIDs, err := s.candidates.EligibleAccountIDsForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, identity.AccountScope)
+	eligibleIDs, eligibleEgressIDs, allEgressBound, err := s.candidates.ImageCapacityEligibilityForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, identity.AccountScope)
 	if err != nil {
 		return Attestation{}, errors.Join(ErrEvidenceUnavailable, err)
 	}
 	eligibleIDs = normalizedIDs(eligibleIDs)
+	eligibleEgressIDs = normalizedIDs(eligibleEgressIDs)
+	maxAttempts := s.routing.ImageCapacityMaxAttempts()
+	fairnessPolicy := s.candidates.ImageCapacityFairnessPolicy()
+	if !allEgressBound || fairnessPolicy != account.ImageProFairnessPolicy || (maxAttempts != -1 && (maxAttempts <= 0 || maxAttempts < len(eligibleEgressIDs))) {
+		return Attestation{}, ErrRouteNotAttestable
+	}
 	result := Attestation{
 		SchemaVersion:                  SchemaVersion,
 		ObservedAt:                     observedAt,
@@ -147,7 +169,10 @@ func (s *Service) Attest(ctx context.Context, request Request) (Attestation, err
 		Route:                          routeAttestation(route),
 		EligibleImageIdentityCount:     len(eligibleIDs),
 		EligibleImageIdentitySetSHA256: identitySetSHA256(eligibleIDs),
-		Build:                          build,
+		Routing: RoutingAttestation{
+			RetryPolicy: RetryPolicy, MaxAttempts: maxAttempts, EligibleEgressCount: len(eligibleEgressIDs), FairnessPolicy: fairnessPolicy,
+		},
+		Build: build,
 	}
 	if request.Since == nil {
 		return result, nil

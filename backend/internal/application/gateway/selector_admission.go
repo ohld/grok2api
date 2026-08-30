@@ -39,27 +39,61 @@ type candidateAdmissionOptions struct {
 // available, after every persisted route, scope, capability, health, and quota
 // gate has been applied.
 func (s *Selector) EligibleAccountIDsForKey(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, scope clientkeydomain.AccountScope) ([]uint64, error) {
+	accountIDs, _, _, err := s.ImageCapacityEligibilityForKey(ctx, provider, modelRouteID, upstreamModel, quotaMode, scope)
+	return accountIDs, err
+}
+
+// ImageCapacityEligibilityForKey projects the same persisted admission set as
+// AcquireForKey plus the distinct bound egress nodes needed to prove safe
+// pre-submit failover. allEgressBound is false when any otherwise eligible
+// identity would receive an adapter-selected, unverifiable egress.
+func (s *Selector) ImageCapacityEligibilityForKey(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, scope clientkeydomain.AccountScope) (accountIDs, egressNodeIDs []uint64, allEgressBound bool, err error) {
 	accountScope, valid := clientkeydomain.NormalizeAccountScope(scope)
 	if !valid || !accountScope.AllowsProvider(provider) {
-		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: accountScope}
+		return nil, nil, false, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: accountScope}
 	}
 	now := time.Now().UTC()
 	values, err := s.loadCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode, now)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	quotaConsumed := s.quotaConsumptionSnapshot(provider)
 	healthOverrides := s.routingHealthSnapshot(provider, now)
 	ids := make([]uint64, 0, len(values))
+	egressIDs := make([]uint64, 0, len(values))
+	allBound := true
 	for _, candidate := range values {
 		credential := applyHealthSnapshot(candidate.Credential, healthOverrides)
 		admission := s.evaluateCandidateAdmission(provider, upstreamModel, quotaMode, candidate, credential, accountScope, quotaConsumed, now, candidateAdmissionOptions{})
 		if admission.state == candidateAdmissionEligible {
 			ids = append(ids, credential.ID)
+			if credential.EgressNodeID == 0 {
+				allBound = false
+			} else {
+				egressIDs = append(egressIDs, credential.EgressNodeID)
+			}
 		}
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	return ids, nil
+	sort.Slice(egressIDs, func(i, j int) bool { return egressIDs[i] < egressIDs[j] })
+	return ids, uniqueUint64s(egressIDs), allBound, nil
+}
+
+func (s *Selector) ImageCapacityFairnessPolicy() string { return account.ImageProFairnessPolicy }
+
+func uniqueUint64s(values []uint64) []uint64 {
+	if len(values) < 2 {
+		return values
+	}
+	write := 1
+	for _, value := range values[1:] {
+		if value == values[write-1] {
+			continue
+		}
+		values[write] = value
+		write++
+	}
+	return values[:write]
 }
 
 func (s *Selector) evaluateCandidateAdmission(

@@ -34,6 +34,10 @@ func TestImageCapacityAttestationHTTPPrivacyContractIsExact(t *testing.T) {
 		},
 		EligibleImageIdentityCount:     2,
 		EligibleImageIdentitySetSHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Routing: imagecapacityapp.RoutingAttestation{
+			RetryPolicy: imagecapacityapp.RetryPolicy, MaxAttempts: 999,
+			EligibleEgressCount: 2, FairnessPolicy: "image_pro_oldest_selection_first_v1",
+		},
 		Build: buildinfo.Attestation{
 			SourceCommit:       "0123456789abcdef0123456789abcdef01234567",
 			RuntimeImageDigest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -54,7 +58,7 @@ func TestImageCapacityAttestationHTTPPrivacyContractIsExact(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	want := `{"data":{"schemaVersion":"grok-image-capacity-attestation-v2","observedAt":"2026-08-30T10:00:00Z","clientKeyFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","route":{"id":"7","publicId":"grok-image","upstreamModel":"grok-image-upstream","capability":"image","bindingMode":true,"topologySha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"eligibleImageIdentityCount":2,"eligibleImageIdentitySetSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","build":{"sourceCommit":"0123456789abcdef0123456789abcdef01234567","runtimeImageDigest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","buildFingerprint":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"coverage":{"operation":"image_generation","since":"2026-08-30T09:00:00Z","runMarker":"3b36292091cb9b4d9b27cc37","selectedSuccessfulIdentityCount":2,"selectedSuccessfulIdentitySetSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","terminalSuccessCount":3}}}`
+	want := `{"data":{"schemaVersion":"grok-image-capacity-attestation-v2","observedAt":"2026-08-30T10:00:00Z","clientKeyFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","route":{"id":"7","publicId":"grok-image","upstreamModel":"grok-image-upstream","capability":"image","bindingMode":true,"topologySha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"eligibleImageIdentityCount":2,"eligibleImageIdentitySetSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","routing":{"retryPolicy":"image_pre_submit_cross_egress_v1","maxAttempts":999,"eligibleEgressCount":2,"fairnessPolicy":"image_pro_oldest_selection_first_v1"},"build":{"sourceCommit":"0123456789abcdef0123456789abcdef01234567","runtimeImageDigest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","buildFingerprint":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"coverage":{"operation":"image_generation","since":"2026-08-30T09:00:00Z","runMarker":"3b36292091cb9b4d9b27cc37","selectedSuccessfulIdentityCount":2,"selectedSuccessfulIdentitySetSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","terminalSuccessCount":3}}}`
 	if strings.TrimSpace(recorder.Body.String()) != want {
 		t.Fatalf("body = %s", recorder.Body.String())
 	}

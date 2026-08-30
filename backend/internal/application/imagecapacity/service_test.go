@@ -15,6 +15,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
@@ -36,6 +37,7 @@ type serviceFixture struct {
 	audits     *relational.AuditRepository
 	keys       *relational.ClientKeyRepository
 	quotaModes staticQuotaModes
+	routing    *staticRoutingPolicy
 	service    *Service
 	route      modeldomain.Route
 	key        clientkeydomain.Key
@@ -47,6 +49,10 @@ type serviceFixture struct {
 }
 
 type staticQuotaModes map[string]string
+
+type staticRoutingPolicy struct{ maxAttempts int }
+
+func (p *staticRoutingPolicy) ImageCapacityMaxAttempts() int { return p.maxAttempts }
 
 func (m staticQuotaModes) QuotaMode(_ account.Provider, upstreamModel string) string {
 	return m[upstreamModel]
@@ -64,6 +70,13 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 		t.Fatal(err)
 	}
 	accounts := relational.NewAccountRepository(database)
+	egressNodes := relational.NewEgressRepository(database)
+	egressNode, err := egressNodes.CreateEgressNode(ctx, egressdomain.Node{
+		Name: "capacity-egress", Scope: egressdomain.ScopeWeb, Enabled: true, EncryptedProxyURL: "encrypted",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	models := relational.NewModelRepository(database)
 	audits := relational.NewAuditRepository(database)
 	keys := relational.NewClientKeyRepository(database)
@@ -73,7 +86,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: tier,
 			Name: name, SourceKey: name, EncryptedAccessToken: "encrypted-" + name,
 			Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 2,
-			RoutingCohort: cohort, CooldownUntil: cooldown,
+			RoutingCohort: cohort, CooldownUntil: cooldown, EgressNodeID: egressNode.ID,
 		})
 		if createErr != nil {
 			t.Fatal(createErr)
@@ -123,11 +136,12 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	}
 	selector := gateway.NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 	quotaModes := staticQuotaModes{route.UpstreamModel: account.QuotaModeWebImagePro, "grok-imagine-image": "fast"}
-	service := NewService(clientkeyapp.NewService(keys, nil, nil, 60, 4, cipher), modelapp.NewService(models, accounts, nil, nil), quotaModes, selector, audits)
+	routing := &staticRoutingPolicy{maxAttempts: 999}
+	service := NewService(clientkeyapp.NewService(keys, nil, nil, 60, 4, cipher), modelapp.NewService(models, accounts, nil, nil), quotaModes, selector, routing, audits)
 	service.now = func() time.Time { return now }
 	service.build = func() (buildinfo.Attestation, error) { return testBuildAttestation, nil }
 	return &serviceFixture{
-		ctx: ctx, now: now, database: database, accounts: accounts, models: models, audits: audits, keys: keys, quotaModes: quotaModes, service: service,
+		ctx: ctx, now: now, database: database, accounts: accounts, models: models, audits: audits, keys: keys, quotaModes: quotaModes, routing: routing, service: service,
 		route: route, key: key, eligible: eligible, exhausted: exhausted, cooling: cooling, blocked: blocked, policyOut: policyOut,
 	}
 }
@@ -166,6 +180,50 @@ func TestAttestationUsesCanonicalExplicitRouteAndClientPolicy(t *testing.T) {
 	}
 	if value.EligibleImageIdentityCount != 1 || value.EligibleImageIdentitySetSHA256 != identitySetSHA256([]uint64{fixture.eligible.ID}) {
 		t.Fatalf("eligible capacity = %#v", value)
+	}
+	if value.Routing.RetryPolicy != RetryPolicy || value.Routing.MaxAttempts != 999 || value.Routing.EligibleEgressCount != 1 || value.Routing.FairnessPolicy != account.ImageProFairnessPolicy {
+		t.Fatalf("routing attestation = %#v", value.Routing)
+	}
+}
+
+func TestAttestationRefusesRoutingBudgetBelowEligibleEgressCount(t *testing.T) {
+	fixture := newServiceFixture(t)
+	secondNode, err := relational.NewEgressRepository(fixture.database).CreateEgressNode(fixture.ctx, egressdomain.Node{
+		Name: "capacity-egress-two", Scope: egressdomain.ScopeWeb, Enabled: true, EncryptedProxyURL: "encrypted-two",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := fixture.accounts.UpsertByIdentity(fixture.ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierSuper,
+		Name: "eligible-second", SourceKey: "eligible-second", EncryptedAccessToken: "encrypted-second",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+		RoutingCohort: "stress", EgressNodeID: secondNode.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.accounts.SaveQuotaWindows(fixture.ctx, second.ID, account.WebTierSuper, fixture.now, []account.QuotaWindow{{
+		AccountID: second.ID, Mode: account.QuotaModeWebImagePro, Remaining: 4, Total: 4,
+		SyncedAt: &fixture.now, Source: account.QuotaSourceUpstream,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.route.BoundAccountIDs = append(fixture.route.BoundAccountIDs, second.ID)
+	if _, err := fixture.models.Update(fixture.ctx, fixture.route, &fixture.route.BoundAccountIDs); err != nil {
+		t.Fatal(err)
+	}
+	fixture.routing.maxAttempts = 1
+	if _, err := fixture.service.Attest(fixture.ctx, Request{ClientKeyID: fixture.key.ID, RouteID: fixture.route.ID}); !errors.Is(err, ErrRouteNotAttestable) {
+		t.Fatalf("insufficient retry budget error = %v", err)
+	}
+	fixture.routing.maxAttempts = -1
+	value, err := fixture.service.Attest(fixture.ctx, Request{ClientKeyID: fixture.key.ID, RouteID: fixture.route.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Routing.MaxAttempts != -1 || value.Routing.EligibleEgressCount != 2 {
+		t.Fatalf("unlimited routing attestation = %#v", value.Routing)
 	}
 }
 

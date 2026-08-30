@@ -555,6 +555,19 @@ func TestRoutingAttemptPolicy(t *testing.T) {
 	}
 }
 
+func TestImageCapacityMaxAttemptsReflectsHotReload(t *testing.T) {
+	t.Parallel()
+	service := &Service{}
+	service.UpdateMaxAttempts(17)
+	if got := service.ImageCapacityMaxAttempts(); got != 17 {
+		t.Fatalf("image capacity max attempts = %d, want 17", got)
+	}
+	service.UpdateMaxAttempts(unlimitedRoutingAttempts)
+	if got := service.ImageCapacityMaxAttempts(); got != unlimitedRoutingAttempts {
+		t.Fatalf("image capacity unlimited attempts = %d", got)
+	}
+}
+
 func TestPinnedRequestAttemptPolicyAlwaysAllowsOneAttempt(t *testing.T) {
 	for _, configured := range []int{1, 6, unlimitedRoutingAttempts} {
 		policy := newRequestRoutingAttemptPolicy(configured, true)
