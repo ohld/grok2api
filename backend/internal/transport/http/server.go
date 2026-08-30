@@ -186,6 +186,9 @@ func New(deps Dependencies) *gin.Engine {
 				c.Next()
 				return
 			}
+			if middleware.AbortImagePreSubmitRefusal(c) {
+				return
+			}
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
 				"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
 			}})

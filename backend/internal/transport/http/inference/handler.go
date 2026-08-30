@@ -49,7 +49,7 @@ const (
 	responseWriteTimeout            = 30 * time.Second
 )
 
-const upstreamRequestDispositionHeader = "X-Upstream-Request-Disposition"
+const upstreamRequestDispositionHeader = middleware.UpstreamRequestDispositionHeader
 
 var (
 	errResponseTransferLimit    = errors.New("响应超过代理安全上限")
@@ -2196,14 +2196,14 @@ func writeImageGenerationUserError(c *gin.Context, code, param, message string) 
 }
 
 func writeGatewayError(c *gin.Context, err error) {
+	if errors.Is(err, gateway.ErrUpstreamNotSubmitted) && middleware.AbortImagePreSubmitRefusal(c) {
+		return
+	}
 	status, code := http.StatusBadGateway, "upstream_unavailable"
 	message := "上游服务暂不可用"
 	var upstreamFailure *gateway.UpstreamFailure
 	var selectionFailure *gateway.SelectionUnavailableError
 	switch {
-	case errors.Is(err, gateway.ErrUpstreamNotSubmitted):
-		status, code = http.StatusServiceUnavailable, "upstream_not_submitted"
-		c.Header(upstreamRequestDispositionHeader, "not-submitted")
 	case errors.Is(err, gateway.ErrLedgerUnavailable):
 		status, code = http.StatusServiceUnavailable, "ledger_unavailable"
 		message = gateway.ErrLedgerUnavailable.Error()

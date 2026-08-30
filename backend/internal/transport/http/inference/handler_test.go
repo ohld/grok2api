@@ -232,29 +232,51 @@ func TestGatewayErrorExposesSafeImageFailoverOnlyForExplicitNotSubmittedSentinel
 	gin.SetMode(gin.TestMode)
 	for _, test := range []struct {
 		name        string
+		method      string
+		path        string
 		err         error
 		status      int
 		code        string
 		disposition string
 	}{
 		{
-			name: "proven not submitted", err: fmt.Errorf("wrapped: %w", gateway.ErrUpstreamNotSubmitted),
+			name: "proven generation not submitted", method: http.MethodPost, path: "/v1/images/generations",
+			err:    fmt.Errorf("wrapped: %w", gateway.ErrUpstreamNotSubmitted),
 			status: http.StatusServiceUnavailable, code: "upstream_not_submitted", disposition: "not-submitted",
 		},
 		{
-			name: "ambiguous upstream failure", err: errors.New("write may have reached upstream"),
+			name: "proven edit not submitted", method: http.MethodPost, path: "/v1/images/edits",
+			err:    fmt.Errorf("wrapped: %w", gateway.ErrUpstreamNotSubmitted),
+			status: http.StatusServiceUnavailable, code: "upstream_not_submitted", disposition: "not-submitted",
+		},
+		{
+			name: "sentinel on wrong method fails closed", method: http.MethodGet, path: "/v1/images/generations",
+			err:    fmt.Errorf("wrapped: %w", gateway.ErrUpstreamNotSubmitted),
 			status: http.StatusBadGateway, code: "upstream_unavailable",
 		},
 		{
-			name: "ordinary account exhaustion", err: gateway.ErrNoAvailableAccount,
+			name: "sentinel on non image route fails closed", method: http.MethodPost, path: "/v1/responses",
+			err:    fmt.Errorf("wrapped: %w", gateway.ErrUpstreamNotSubmitted),
+			status: http.StatusBadGateway, code: "upstream_unavailable",
+		},
+		{
+			name: "ambiguous upstream failure", method: http.MethodPost, path: "/v1/images/generations",
+			err:    errors.New("write may have reached upstream"),
+			status: http.StatusBadGateway, code: "upstream_unavailable",
+		},
+		{
+			name: "ordinary account exhaustion", method: http.MethodPost, path: "/v1/images/generations",
+			err:    gateway.ErrNoAvailableAccount,
 			status: http.StatusServiceUnavailable, code: "upstream_unavailable",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			router := gin.New()
-			router.GET("/", func(c *gin.Context) { writeGatewayError(c, test.err) })
+			router.Handle(test.method, test.path, func(c *gin.Context) { writeGatewayError(c, test.err) })
 			recorder := httptest.NewRecorder()
-			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set(upstreamRequestDispositionHeader, "not-submitted")
+			router.ServeHTTP(recorder, request)
 			var payload struct {
 				Error struct {
 					Code string `json:"code"`
