@@ -1426,7 +1426,7 @@ func TestGenerateImageReturnsWhenEveryCredentialRefreshFails(t *testing.T) {
 		RequestID: "req-image-credential-failure", ClientKey: clientkey.Key{ID: 1, Name: "image-key"},
 		PublicModel: "image-credential-failure", Prompt: "test", Count: 1, ResponseFormat: "url",
 	})
-	if !errors.Is(err, ErrNoAvailableAccount) {
+	if !errors.Is(err, ErrUpstreamNotSubmitted) {
 		t.Fatalf("error = %v", err)
 	}
 	if adapter.generationCalls.Load() != 0 {

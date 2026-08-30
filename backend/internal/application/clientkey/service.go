@@ -73,6 +73,18 @@ type Created struct {
 	Secret string
 }
 
+// ConcurrencySnapshot is an exact, read-only, secret-free view of one client
+// key's identity, configured limits, and active runtime leases.
+type ConcurrencySnapshot struct {
+	ID              uint64
+	Name            string
+	Prefix          string
+	RPMLimit        int
+	MaxConcurrent   int
+	KeyFingerprint  string
+	CurrentInflight int
+}
+
 type ListFilter struct {
 	Status     string
 	ModelScope string
@@ -146,6 +158,44 @@ func (s *Service) Get(ctx context.Context, id uint64) (clientkeydomain.Key, erro
 	}
 	value, err := s.keys.Get(ctx, id)
 	return value, mapRepositoryError(err)
+}
+
+// GetConcurrencySnapshot reads the canonical lease counter without acquiring or
+// releasing a lease. Runtime implementations that cannot provide the read-only
+// batch snapshot contract are rejected instead of falling back to supplied or
+// inferred state.
+func (s *Service) GetConcurrencySnapshot(ctx context.Context, id uint64) (ConcurrencySnapshot, error) {
+	value, err := s.Get(ctx, id)
+	if err != nil {
+		return ConcurrencySnapshot{}, err
+	}
+	raw, err := s.validatedSecret(value)
+	if err != nil {
+		return ConcurrencySnapshot{}, fmt.Errorf("%w: 客户端 Key 指纹不可用", ErrRuntimeUnavailable)
+	}
+	fingerprint := security.ClientKeyFingerprint(raw)
+	reader, ok := s.concurrency.(repository.ConcurrencySnapshotReader)
+	if !ok {
+		return ConcurrencySnapshot{}, fmt.Errorf("%w: 并发租约快照读取器未配置", ErrRuntimeUnavailable)
+	}
+	runtimeKey := repository.ClientConcurrencyKey(value.ID)
+	counts, err := reader.CurrentMany(ctx, []string{runtimeKey})
+	if err != nil {
+		return ConcurrencySnapshot{}, fmt.Errorf("%w: 并发租约快照: %v", ErrRuntimeUnavailable, err)
+	}
+	current := counts[runtimeKey]
+	if current < 0 {
+		return ConcurrencySnapshot{}, fmt.Errorf("%w: 并发租约快照无效", ErrRuntimeUnavailable)
+	}
+	return ConcurrencySnapshot{
+		ID:              value.ID,
+		Name:            value.Name,
+		Prefix:          value.Prefix,
+		RPMLimit:        value.RPMLimit,
+		MaxConcurrent:   value.MaxConcurrent,
+		KeyFingerprint:  fingerprint,
+		CurrentInflight: current,
+	}, nil
 }
 
 // EnsureQualityGuardIdentity creates or reconciles the non-exportable system
@@ -285,6 +335,10 @@ func (s *Service) RevealSecret(ctx context.Context, id uint64) (string, error) {
 	if value.InternalKind != "" {
 		return "", ErrSystemManaged
 	}
+	return s.validatedSecret(value)
+}
+
+func (s *Service) validatedSecret(value clientkeydomain.Key) (string, error) {
 	if s.cipher == nil || value.EncryptedSecret == "" {
 		return "", ErrSecretUnavailable
 	}
@@ -471,7 +525,7 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 	if value.MaxConcurrent > 0 {
 		var acquired bool
 		var err error
-		release, acquired, err = s.concurrency.Acquire(ctx, fmt.Sprintf("client:%d", value.ID), value.MaxConcurrent)
+		release, acquired, err = s.concurrency.Acquire(ctx, repository.ClientConcurrencyKey(value.ID), value.MaxConcurrent)
 		if err != nil {
 			return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 并发租约: %v", ErrRuntimeUnavailable, err)
 		}
