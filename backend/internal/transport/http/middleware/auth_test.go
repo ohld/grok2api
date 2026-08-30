@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/shared/transportmeta"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/adminsession"
 	"github.com/gin-gonic/gin"
 )
@@ -98,7 +99,7 @@ func TestClientAuthImageCapacityRefusalProvesNotSubmitted(t *testing.T) {
 			if context.Writer.Status() != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want %d", context.Writer.Status(), http.StatusServiceUnavailable)
 			}
-			if disposition := context.Writer.Header().Get("X-Upstream-Request-Disposition"); disposition != "not-submitted" {
+			if disposition := context.Writer.Header().Get(transportmeta.UpstreamRequestDispositionHeader); disposition != transportmeta.UpstreamRequestNotSubmitted {
 				t.Fatalf("disposition = %q", disposition)
 			}
 			var payload struct {
@@ -116,6 +117,44 @@ func TestClientAuthImageCapacityRefusalProvesNotSubmitted(t *testing.T) {
 	}
 }
 
+func TestClientAuthConversationCapacityRefusalProvesNotSubmittedWithoutChangingError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name string
+		path string
+		err  error
+		code string
+	}{
+		{name: "chat concurrency", path: "/v1/chat/completions", err: clientkeyapp.ErrConcurrencyLimit, code: "concurrency_limit_exceeded"},
+		{name: "chat rpm", path: "/v1/chat/completions", err: clientkeyapp.ErrRateLimited, code: "rate_limit_exceeded"},
+		{name: "responses billing", path: "/v1/responses", err: clientkeyapp.ErrBillingLimit, code: "billing_limit_exceeded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(http.MethodPost, test.path, nil)
+			writeClientAuthError(context, test.err)
+			if context.Writer.Status() != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", context.Writer.Status(), http.StatusTooManyRequests)
+			}
+			if disposition := context.Writer.Header().Get(transportmeta.UpstreamRequestDispositionHeader); disposition != transportmeta.UpstreamRequestNotSubmitted {
+				t.Fatalf("disposition = %q", disposition)
+			}
+			var payload struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Error.Code != test.code {
+				t.Fatalf("error code = %q, want %q", payload.Error.Code, test.code)
+			}
+		})
+	}
+}
+
 func TestClientAuthNonImageOrAmbiguousFailureNeverClaimsNotSubmitted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, test := range []struct {
@@ -125,7 +164,8 @@ func TestClientAuthNonImageOrAmbiguousFailureNeverClaimsNotSubmitted(t *testing.
 		status int
 		code   string
 	}{
-		{name: "chat concurrency", path: "/v1/chat/completions", err: clientkeyapp.ErrConcurrencyLimit, status: http.StatusTooManyRequests, code: "concurrency_limit_exceeded"},
+		{name: "video concurrency", path: "/v1/videos/generations", err: clientkeyapp.ErrConcurrencyLimit, status: http.StatusTooManyRequests, code: "concurrency_limit_exceeded"},
+		{name: "responses runtime", path: "/v1/responses", err: clientkeyapp.ErrRuntimeUnavailable, status: http.StatusServiceUnavailable, code: "runtime_store_unavailable"},
 		{name: "image runtime", path: "/v1/images/generations", err: clientkeyapp.ErrRuntimeUnavailable, status: http.StatusServiceUnavailable, code: "runtime_store_unavailable"},
 		{name: "image authentication", path: "/v1/images/generations", err: clientkeyapp.ErrInvalidKey, status: http.StatusUnauthorized, code: "invalid_api_key"},
 	} {
@@ -137,7 +177,7 @@ func TestClientAuthNonImageOrAmbiguousFailureNeverClaimsNotSubmitted(t *testing.
 			if context.Writer.Status() != test.status {
 				t.Fatalf("status = %d, want %d", context.Writer.Status(), test.status)
 			}
-			if disposition := context.Writer.Header().Get("X-Upstream-Request-Disposition"); disposition != "" {
+			if disposition := context.Writer.Header().Get(transportmeta.UpstreamRequestDispositionHeader); disposition != "" {
 				t.Fatalf("unexpected disposition = %q", disposition)
 			}
 			var payload struct {

@@ -25,6 +25,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/mediafile"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/shared/transportmeta"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
@@ -48,8 +49,6 @@ const (
 	maxMediaResponseTransferBytes   = int64(2) << 30
 	responseWriteTimeout            = 30 * time.Second
 )
-
-const upstreamRequestDispositionHeader = "X-Upstream-Request-Disposition"
 
 var (
 	errResponseTransferLimit    = errors.New("响应超过代理安全上限")
@@ -2155,7 +2154,7 @@ func copyHeaders(destination, source http.Header) {
 		"transfer-encoding": {}, "upgrade": {}, "x-models-etag": {},
 		// This is a local provenance assertion consumed by downstream failover.
 		// An observed upstream response must never be able to mint it.
-		strings.ToLower(upstreamRequestDispositionHeader): {},
+		strings.ToLower(transportmeta.UpstreamRequestDispositionHeader): {},
 	}
 	for _, value := range source.Values("Connection") {
 		for name := range strings.SplitSeq(value, ",") {
@@ -2203,7 +2202,7 @@ func writeGatewayError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, gateway.ErrUpstreamNotSubmitted):
 		status, code = http.StatusServiceUnavailable, "upstream_not_submitted"
-		c.Header(upstreamRequestDispositionHeader, "not-submitted")
+		c.Header(transportmeta.UpstreamRequestDispositionHeader, transportmeta.UpstreamRequestNotSubmitted)
 	case errors.Is(err, gateway.ErrLedgerUnavailable):
 		status, code = http.StatusServiceUnavailable, "ledger_unavailable"
 		message = gateway.ErrLedgerUnavailable.Error()
@@ -2244,6 +2243,13 @@ func writeGatewayError(c *gin.Context, err error) {
 		}
 	case errors.As(err, &selectionFailure):
 		status, code, message = selectionErrorResponse(c, selectionFailure)
+		if transportmeta.IsConversationInferencePath(c.Request.URL.Path) {
+			// Selection failures happen before an account lease can submit the
+			// conversation upstream. The HTTP layer may therefore expose the same
+			// opt-in safe-failover proof used by images without changing the public
+			// status or error body. Observed provider responses never take this case.
+			c.Header(transportmeta.UpstreamRequestDispositionHeader, transportmeta.UpstreamRequestNotSubmitted)
+		}
 	case errors.Is(err, gateway.ErrResponseAccountUnavailable), errors.Is(err, gateway.ErrNoAvailableAccount):
 		status, code = http.StatusServiceUnavailable, "upstream_unavailable"
 		message = "当前没有可用的上游账号"

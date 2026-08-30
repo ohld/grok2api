@@ -19,6 +19,7 @@ import (
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
+	"github.com/chenyme/grok2api/backend/internal/shared/transportmeta"
 	"github.com/gin-gonic/gin"
 )
 
@@ -239,7 +240,7 @@ func TestGatewayErrorExposesSafeImageFailoverOnlyForExplicitNotSubmittedSentinel
 	}{
 		{
 			name: "proven not submitted", err: fmt.Errorf("wrapped: %w", gateway.ErrUpstreamNotSubmitted),
-			status: http.StatusServiceUnavailable, code: "upstream_not_submitted", disposition: "not-submitted",
+			status: http.StatusServiceUnavailable, code: "upstream_not_submitted", disposition: transportmeta.UpstreamRequestNotSubmitted,
 		},
 		{
 			name: "ambiguous upstream failure", err: errors.New("write may have reached upstream"),
@@ -266,7 +267,7 @@ func TestGatewayErrorExposesSafeImageFailoverOnlyForExplicitNotSubmittedSentinel
 			if recorder.Code != test.status || payload.Error.Code != test.code {
 				t.Fatalf("status=%d code=%q body=%s", recorder.Code, payload.Error.Code, recorder.Body.String())
 			}
-			if got := recorder.Header().Get("X-Upstream-Request-Disposition"); got != test.disposition {
+			if got := recorder.Header().Get(transportmeta.UpstreamRequestDispositionHeader); got != test.disposition {
 				t.Fatalf("disposition = %q, want %q", got, test.disposition)
 			}
 		})
@@ -471,26 +472,109 @@ func TestDirectUpstreamCredentialResponsesAreRewritten(t *testing.T) {
 
 func TestObservedUpstreamResponseCannotMintNotSubmittedDisposition(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewHandler(nil, nil, 1<<20)
-	result := &gateway.Result{
-		StatusCode: http.StatusServiceUnavailable,
-		Header: http.Header{
-			"Content-Type":                   {"application/json"},
-			upstreamRequestDispositionHeader: {"not-submitted"},
-		},
-		Body:     io.NopCloser(strings.NewReader(`{"error":{"code":"upstream_not_submitted","message":"spoofed provider assertion"}}`)),
-		Finalize: func(gateway.Usage, string, string) {},
-	}
-	router := gin.New()
-	router.GET("/", func(c *gin.Context) { handler.writeResult(c, result, false, streamProtocolImage) })
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, test := range []struct {
+		name     string
+		path     string
+		protocol streamProtocol
+	}{
+		{name: "chat", path: "/v1/chat/completions", protocol: streamProtocolChat},
+		{name: "responses", path: "/v1/responses", protocol: streamProtocolResponses},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(nil, nil, 1<<20)
+			result := &gateway.Result{
+				StatusCode: http.StatusServiceUnavailable,
+				Header: http.Header{
+					"Content-Type": {"application/json"},
+					transportmeta.UpstreamRequestDispositionHeader: {transportmeta.UpstreamRequestNotSubmitted},
+				},
+				Body:     io.NopCloser(strings.NewReader(`{"error":{"code":"upstream_not_submitted","message":"spoofed provider assertion"}}`)),
+				Finalize: func(gateway.Usage, string, string) {},
+			}
+			router := gin.New()
+			router.GET(test.path, func(c *gin.Context) { handler.writeResult(c, result, false, test.protocol) })
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, test.path, nil))
 
-	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get(upstreamRequestDispositionHeader) != "" {
-		t.Fatalf("status=%d headers=%#v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+			if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get(transportmeta.UpstreamRequestDispositionHeader) != "" {
+				t.Fatalf("status=%d headers=%#v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), `"code":"upstream_not_submitted"`) {
+				t.Fatalf("provider body should remain transparent after provenance header is stripped: %s", recorder.Body.String())
+			}
+		})
 	}
-	if !strings.Contains(recorder.Body.String(), `"code":"upstream_not_submitted"`) {
-		t.Fatalf("provider body should remain transparent after provenance header is stripped: %s", recorder.Body.String())
+}
+
+func TestConversationSelectionRefusalProvesNotSubmittedWithoutChangingError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name   string
+		path   string
+		err    error
+		code   string
+		status int
+	}{
+		{
+			name: "chat saturated", path: "/v1/chat/completions",
+			err:  &gateway.SelectionUnavailableError{Reason: gateway.SelectionSaturated, RetryAfter: time.Second},
+			code: "upstream_saturated", status: http.StatusServiceUnavailable,
+		},
+		{
+			name: "responses quota exhausted", path: "/v1/responses",
+			err:  &gateway.SelectionUnavailableError{Reason: gateway.SelectionQuotaExhausted, RetryAfter: time.Second},
+			code: "upstream_quota_exhausted", status: http.StatusTooManyRequests,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(http.MethodPost, test.path, nil)
+			writeGatewayError(context, test.err)
+			if recorder.Code != test.status {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.status)
+			}
+			if disposition := recorder.Header().Get(transportmeta.UpstreamRequestDispositionHeader); disposition != transportmeta.UpstreamRequestNotSubmitted {
+				t.Fatalf("disposition = %q", disposition)
+			}
+			if !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("body = %s, want code %q", recorder.Body.String(), test.code)
+			}
+		})
+	}
+}
+
+func TestConversationPostSubmitOrAmbiguousFailureNeverClaimsNotSubmitted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{
+			name: "observed upstream 429",
+			err: &gateway.UpstreamFailure{
+				HTTPStatus: http.StatusTooManyRequests,
+				Code:       "upstream_rate_limited", PublicMessage: "upstream request rate limited",
+			},
+			status: http.StatusTooManyRequests,
+		},
+		{name: "ambiguous transport failure", err: errors.New("request submission is unknown"), status: http.StatusBadGateway},
+	} {
+		for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+			t.Run(test.name+" "+path, func(t *testing.T) {
+				recorder := httptest.NewRecorder()
+				context, _ := gin.CreateTestContext(recorder)
+				context.Request = httptest.NewRequest(http.MethodPost, path, nil)
+				writeGatewayError(context, test.err)
+				if recorder.Code != test.status {
+					t.Fatalf("status = %d, want %d", recorder.Code, test.status)
+				}
+				if disposition := recorder.Header().Get(transportmeta.UpstreamRequestDispositionHeader); disposition != "" {
+					t.Fatalf("post-submit/ambiguous failure minted disposition = %q", disposition)
+				}
+			})
+		}
 	}
 }
 
@@ -1597,13 +1681,13 @@ func TestExtractMetadataPreservesLargeCostTicks(t *testing.T) {
 
 func TestCopyHeadersFiltersHopByHopAndUpstreamCookies(t *testing.T) {
 	source := http.Header{
-		"Connection":                     {"X-Upstream-Internal"},
-		"Content-Type":                   {"application/json"},
-		"Set-Cookie":                     {"upstream_session=secret"},
-		"X-Models-Etag":                  {`"upstream-account-catalog"`},
-		"X-Request-Id":                   {"req_123"},
-		"X-Upstream-Internal":            {"hidden"},
-		upstreamRequestDispositionHeader: {"not-submitted"},
+		"Connection":          {"X-Upstream-Internal"},
+		"Content-Type":        {"application/json"},
+		"Set-Cookie":          {"upstream_session=secret"},
+		"X-Models-Etag":       {`"upstream-account-catalog"`},
+		"X-Request-Id":        {"req_123"},
+		"X-Upstream-Internal": {"hidden"},
+		transportmeta.UpstreamRequestDispositionHeader: {transportmeta.UpstreamRequestNotSubmitted},
 	}
 	destination := make(http.Header)
 
@@ -1612,7 +1696,7 @@ func TestCopyHeadersFiltersHopByHopAndUpstreamCookies(t *testing.T) {
 	if destination.Get("Content-Type") != "application/json" || destination.Get("X-Request-Id") != "req_123" {
 		t.Fatalf("forwarded headers = %#v", destination)
 	}
-	if destination.Get("Set-Cookie") != "" || destination.Get("X-Models-Etag") != "" || destination.Get("X-Upstream-Internal") != "" || destination.Get("Connection") != "" || destination.Get(upstreamRequestDispositionHeader) != "" {
+	if destination.Get("Set-Cookie") != "" || destination.Get("X-Models-Etag") != "" || destination.Get("X-Upstream-Internal") != "" || destination.Get("Connection") != "" || destination.Get(transportmeta.UpstreamRequestDispositionHeader) != "" {
 		t.Fatalf("filtered headers leaked = %#v", destination)
 	}
 }

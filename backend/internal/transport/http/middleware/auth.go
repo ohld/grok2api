@@ -10,6 +10,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/chenyme/grok2api/backend/internal/shared/transportmeta"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/adminsession"
 	"github.com/gin-gonic/gin"
 )
@@ -108,7 +109,7 @@ func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 
 func writeClientAuthError(c *gin.Context, err error) {
 	if imageClientCapacityRefusal(c.Request.URL.Path, err) {
-		c.Header("X-Upstream-Request-Disposition", "not-submitted")
+		c.Header(transportmeta.UpstreamRequestDispositionHeader, transportmeta.UpstreamRequestNotSubmitted)
 		writeOpenAIError(
 			c,
 			http.StatusServiceUnavailable,
@@ -117,11 +118,27 @@ func writeClientAuthError(c *gin.Context, err error) {
 		)
 		return
 	}
+	if conversationClientCapacityRefusal(c.Request.URL.Path, err) {
+		// Authentication middleware runs before any inference handler, so these
+		// capacity refusals positively prove that no conversation payload reached
+		// an upstream. Keep the existing status and public error body unchanged;
+		// downstream failover relies only on this unspoofable response header.
+		c.Header(transportmeta.UpstreamRequestDispositionHeader, transportmeta.UpstreamRequestNotSubmitted)
+	}
 	writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
 }
 
 func imageClientCapacityRefusal(path string, err error) bool {
 	if path != "/v1/images/generations" && path != "/v1/images/edits" {
+		return false
+	}
+	return errors.Is(err, clientkeyapp.ErrRateLimited) ||
+		errors.Is(err, clientkeyapp.ErrConcurrencyLimit) ||
+		errors.Is(err, clientkeyapp.ErrBillingLimit)
+}
+
+func conversationClientCapacityRefusal(path string, err error) bool {
+	if !transportmeta.IsConversationInferencePath(path) {
 		return false
 	}
 	return errors.Is(err, clientkeyapp.ErrRateLimited) ||
