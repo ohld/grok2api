@@ -18,7 +18,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-const SchemaVersion = "grok-image-capacity-attestation-v1"
+const SchemaVersion = "grok-image-capacity-attestation-v2"
+
+const CoverageOperation = "image_generation"
 
 const (
 	identitySetHashDomain   = "grok2api-image-identity-set-v1"
@@ -67,6 +69,7 @@ type RouteAttestation struct {
 }
 
 type CoverageAttestation struct {
+	Operation                           string    `json:"operation"`
 	Since                               time.Time `json:"since"`
 	RunMarker                           string    `json:"runMarker"`
 	SelectedSuccessfulIdentityCount     int       `json:"selectedSuccessfulIdentityCount"`
@@ -157,7 +160,7 @@ func (s *Service) Attest(ctx context.Context, request Request) (Attestation, err
 	}
 	selectedIDs := normalizedIDs(coverage.AccountIDs)
 	result.Coverage = &CoverageAttestation{
-		Since: request.Since.UTC(), RunMarker: request.RunMarker,
+		Operation: CoverageOperation, Since: request.Since.UTC(), RunMarker: request.RunMarker,
 		SelectedSuccessfulIdentityCount: len(selectedIDs), SelectedSuccessfulIdentitySetSHA256: identitySetSHA256(selectedIDs),
 		TerminalSuccessCount: coverage.TerminalSuccessCount,
 	}

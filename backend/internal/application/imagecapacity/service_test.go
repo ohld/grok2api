@@ -246,7 +246,7 @@ func TestAttestationCoverageExcludesOtherKeysRoutesOperationsFailuresAndMarkers(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Coverage == nil || value.Coverage.SelectedSuccessfulIdentityCount != 1 || value.Coverage.TerminalSuccessCount != 2 {
+	if value.Coverage == nil || value.Coverage.Operation != CoverageOperation || value.Coverage.SelectedSuccessfulIdentityCount != 1 || value.Coverage.TerminalSuccessCount != 2 {
 		t.Fatalf("coverage = %#v", value.Coverage)
 	}
 	if value.Coverage.SelectedSuccessfulIdentitySetSHA256 != identitySetSHA256([]uint64{accountID}) {
