@@ -85,6 +85,20 @@ type ConcurrencySnapshot struct {
 	CurrentInflight int
 }
 
+// AttestationIdentity is the secret-free key policy used by trusted capacity
+// evidence services. The raw key is decrypted only long enough to derive its
+// domain-separated fingerprint; names, hashes, ciphertext, and plaintext never
+// cross this application boundary.
+type AttestationIdentity struct {
+	AllowedModels  []uint64
+	AccountScope   clientkeydomain.AccountScope
+	KeyFingerprint string
+}
+
+func (i AttestationIdentity) AllowsModel(modelID uint64) bool {
+	return clientkeydomain.AllowsModel(i.AllowedModels, modelID)
+}
+
 type ListFilter struct {
 	Status     string
 	ModelScope string
@@ -195,6 +209,25 @@ func (s *Service) GetConcurrencySnapshot(ctx context.Context, id uint64) (Concur
 		MaxConcurrent:   value.MaxConcurrent,
 		KeyFingerprint:  fingerprint,
 		CurrentInflight: current,
+	}, nil
+}
+
+func (s *Service) GetAttestationIdentity(ctx context.Context, id uint64, now time.Time) (AttestationIdentity, error) {
+	value, err := s.Get(ctx, id)
+	if err != nil {
+		return AttestationIdentity{}, err
+	}
+	if value.InternalKind != "" || !value.IsAvailable(now.UTC()) {
+		return AttestationIdentity{}, ErrNotFound
+	}
+	raw, err := s.validatedSecret(value)
+	if err != nil {
+		return AttestationIdentity{}, fmt.Errorf("%w: 客户端 Key 指纹不可用", ErrRuntimeUnavailable)
+	}
+	return AttestationIdentity{
+		AllowedModels:  append([]uint64(nil), value.AllowedModels...),
+		AccountScope:   value.AccountScope(),
+		KeyFingerprint: security.ClientKeyFingerprint(raw),
 	}, nil
 }
 
