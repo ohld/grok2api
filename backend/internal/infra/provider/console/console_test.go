@@ -114,6 +114,30 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 	}
 }
 
+func TestConsoleToolChoiceRequiresNonEmptyTools(t *testing.T) {
+	for name, payload := range map[string]map[string]any{
+		"missing tools": {"tool_choice": "auto"},
+		"nil tools":     {"tools": nil, "tool_choice": "required"},
+		"empty tools":   {"tools": []any{}, "tool_choice": "auto"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ensureConsoleToolChoicePair(payload)
+			if _, exists := payload["tool_choice"]; exists {
+				t.Fatalf("tool_choice remained without tools: %#v", payload)
+			}
+		})
+	}
+
+	payload := map[string]any{
+		"tools":       []any{map[string]any{"type": "web_search"}},
+		"tool_choice": "auto",
+	}
+	ensureConsoleToolChoicePair(payload)
+	if payload["tool_choice"] != "auto" || len(payload["tools"].([]any)) != 1 {
+		t.Fatalf("valid tool/tool_choice pair was changed: %#v", payload)
+	}
+}
+
 func TestConsoleVoiceErrorIsSanitizedAndPreservesRetryMetadata(t *testing.T) {
 	response := &http.Response{
 		StatusCode: http.StatusTooManyRequests,
