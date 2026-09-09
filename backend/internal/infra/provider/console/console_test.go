@@ -138,6 +138,35 @@ func TestConsoleToolChoiceRequiresNonEmptyTools(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequestDropsToolChoiceWhenToolsEmpty(t *testing.T) {
+	spec, ok := Resolve("grok-4.5")
+	if !ok {
+		t.Fatal("grok-4.5 missing")
+	}
+	for name, body := range map[string]string{
+		"missing tools": `{"model":"public","input":"hello","tool_choice":"auto"}`,
+		"null tools":    `{"model":"public","input":"hello","tools":null,"tool_choice":"none"}`,
+		"empty tools":   `{"model":"public","input":"hello","tools":[],"tool_choice":"required"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			normalized, err := normalizeRequest([]byte(body), spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(normalized, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := payload["tools"]; exists {
+				t.Fatalf("tools remained without declarations: %#v", payload)
+			}
+			if _, exists := payload["tool_choice"]; exists {
+				t.Fatalf("tool_choice remained without tools: %#v", payload)
+			}
+		})
+	}
+}
+
 func TestConsoleVoiceErrorIsSanitizedAndPreservesRetryMetadata(t *testing.T) {
 	response := &http.Response{
 		StatusCode: http.StatusTooManyRequests,
