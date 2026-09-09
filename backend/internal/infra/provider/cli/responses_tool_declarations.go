@@ -405,6 +405,26 @@ func (c *rootObjectLeafCollector) walk(node any, constraints []map[string]any, s
 			constraints = append(cloneRootConstraints(constraints), sibling)
 		}
 		for _, branch := range branches {
+			// Build function parameters may contain a nullable or otherwise
+			// non-object alternative at the root. Such alternatives cannot be
+			// represented by Build's grammar and are intentionally omitted; the
+			// whole schema is rejected below when no object leaf remains.
+			branchSchema, branchOK := branch.(map[string]any)
+			if !branchOK || isNullOnlySchema(branchSchema) {
+				c.changed = true
+				continue
+			}
+			branchKeyword, _, branchErr := rootUnion(branchSchema)
+			if branchErr != nil {
+				return invalidBuildFunctionParametersRoot(c.context)
+			}
+			// A root $ref may point to another union (for example a named
+			// Create schema). Let walk resolve it before deciding whether its
+			// leaves are object schemas.
+			if branchKeyword == "" && branchSchema["$ref"] == nil && !isObjectRootSchema(branchSchema, c.doc, nil) {
+				c.changed = true
+				continue
+			}
 			if err := c.walk(branch, constraints, cloneRefSeen(seen), depth+1, unionDepth+1); err != nil {
 				return err
 			}
