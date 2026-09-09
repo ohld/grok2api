@@ -346,6 +346,59 @@ func TestNormalizeResponsesRequestFiltersNonObjectBranchesInAnyOf(t *testing.T) 
 	}
 }
 
+func TestNormalizeResponsesRequestKeepsNullableObjectBranch(t *testing.T) {
+	normalized, _, err := normalizeResponsesRequest([]byte(`{
+		"model":"public","input":"hello",
+		"tools":[{"type":"function","name":"lookup","parameters":{
+			"anyOf":[
+				{"type":["object","null"],"properties":{"query":{"type":"string"}}},
+				{"type":"string"}
+			]
+		}}]
+	}`), "grok-4.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(normalized, &payload); err != nil {
+		t.Fatal(err)
+	}
+	parameters := payload["tools"].([]any)[0].(map[string]any)["parameters"].(map[string]any)
+	if parameters["type"] != "object" || parameters["anyOf"] != nil {
+		t.Fatalf("nullable object branch was not normalized: %#v", parameters)
+	}
+	if _, ok := parameters["properties"].(map[string]any)["query"]; !ok {
+		t.Fatalf("nullable object properties were lost: %#v", parameters)
+	}
+}
+
+func TestNormalizeResponsesRequestFiltersScalarRefBranch(t *testing.T) {
+	normalized, _, err := normalizeResponsesRequest([]byte(`{
+		"model":"public","input":"hello",
+		"tools":[{"type":"function","name":"lookup","parameters":{
+			"$defs":{"Scalar":{"type":"string"}},
+			"anyOf":[
+				{"$ref":"#/$defs/Scalar"},
+				{"type":"object","properties":{"query":{"type":"string"}}}
+			]
+		}}]
+	}`), "grok-4.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(normalized, &payload); err != nil {
+		t.Fatal(err)
+	}
+	parameters := payload["tools"].([]any)[0].(map[string]any)["parameters"].(map[string]any)
+	if parameters["type"] != "object" || parameters["anyOf"] != nil {
+		t.Fatalf("scalar ref branch was not filtered: %#v", parameters)
+	}
+	if _, ok := parameters["properties"].(map[string]any)["query"]; !ok {
+		t.Fatalf("object branch was lost: %#v", parameters)
+	}
+}
+
 func TestNormalizeResponsesRequestRemovesNullableLocalRefFunctionRoot(t *testing.T) {
 	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
 		"model":"public","input":"hello",

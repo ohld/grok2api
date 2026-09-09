@@ -410,22 +410,50 @@ func (c *rootObjectLeafCollector) walk(node any, constraints []map[string]any, s
 			// represented by Build's grammar and are intentionally omitted; the
 			// whole schema is rejected below when no object leaf remains.
 			branchSchema, branchOK := branch.(map[string]any)
-			if !branchOK || isNullOnlySchema(branchSchema) {
+			if !branchOK {
 				c.changed = true
 				continue
 			}
-			branchKeyword, _, branchErr := rootUnion(branchSchema)
+			normalizedBranch, nullOnly, typeChanged := normalizeRootObjectType(branchSchema)
+			if nullOnly {
+				c.changed = true
+				continue
+			}
+			if typeChanged {
+				c.changed = true
+			}
+			branchKeyword, _, branchErr := rootUnion(normalizedBranch)
 			if branchErr != nil {
 				return invalidBuildFunctionParametersRoot(c.context)
 			}
 			// A root $ref may point to another union (for example a named
 			// Create schema). Let walk resolve it before deciding whether its
 			// leaves are object schemas.
-			if branchKeyword == "" && branchSchema["$ref"] == nil && !isObjectRootSchema(branchSchema, c.doc, nil) {
-				c.changed = true
-				continue
+			if branchKeyword == "" {
+				if ref, hasRef := normalizedBranch["$ref"].(string); hasRef {
+					resolved, resolvedOK := resolveLocalSchemaRef(c.doc, ref)
+					if !resolvedOK {
+						return invalidBuildFunctionParametersRoot(c.context)
+					}
+					resolvedBranch, resolvedNullOnly, _ := normalizeRootObjectType(resolved)
+					if resolvedNullOnly {
+						c.changed = true
+						continue
+					}
+					resolvedKeyword, _, resolvedErr := rootUnion(resolvedBranch)
+					if resolvedErr != nil {
+						return invalidBuildFunctionParametersRoot(c.context)
+					}
+					if resolvedKeyword == "" && !isObjectRootSchema(resolvedBranch, c.doc, nil) {
+						c.changed = true
+						continue
+					}
+				} else if !isObjectRootSchema(normalizedBranch, c.doc, nil) {
+					c.changed = true
+					continue
+				}
 			}
-			if err := c.walk(branch, constraints, cloneRefSeen(seen), depth+1, unionDepth+1); err != nil {
+			if err := c.walk(normalizedBranch, constraints, cloneRefSeen(seen), depth+1, unionDepth+1); err != nil {
 				return err
 			}
 		}
