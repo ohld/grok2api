@@ -6,7 +6,7 @@ Updated 2026-09-09T09:55Z. This is the authoritative journal for the selective r
 
 - Production baseline before this release: `https://grok.cheapaiapi.org`, `ghcr.io/ohld/grok2api:sha-6d5f9a093bb0d00bb40802f443c49b99c9a83fb`.
 - Reviewed selective branch: `codex/selective-upstream-grok-models`, merged by [PR #3](https://github.com/ohld/grok2api/pull/3) as merge commit `6e45a998602dedd0e8950ab3c6721372c99dfd48` at 2026-09-09T09:48:28Z.
-- The main push is publishing through [GHCR Image run 34336777924](https://github.com/ohld/grok2api/actions/runs/34336777924). The post-deploy serving digest and rollback record will be appended after Coolify converges.
+- The main push completed through [GHCR Image run 34337168931](https://github.com/ohld/grok2api/actions/runs/34337168931). The deployed manifest digest and rollback target are recorded below.
 - Rollback target is the previous immutable image `ghcr.io/ohld/grok2api:sha-6d5f9a093bb0d00bb40802f443c49b99c9a83fb`; no database migration is part of this release.
 
 ## Included changes
@@ -48,3 +48,13 @@ Updated 2026-09-09T09:55Z. This is the authoritative journal for the selective r
 - [Issue #905](https://github.com/chenyme/grok2api/issues/905), [PR #906](https://github.com/chenyme/grok2api/pull/906), and its [fix summary](https://github.com/chenyme/grok2api/issues/905#issuecomment-5276086387): sparse Build model discovery needed to preserve `grok-4.5` compatibility.
 - [Issue #902](https://github.com/chenyme/grok2api/issues/902) and [stability comment](https://github.com/chenyme/grok2api/issues/902#issuecomment-5310827079): upstream reports described recurring 4.6 quota failures and steadier 4.5 behavior.
 - [Issue #916](https://github.com/chenyme/grok2api/issues/916) and [egress-risk comment](https://github.com/chenyme/grok2api/issues/916#issuecomment-5282191035): upstream discussion identified shared-IP and batch-account risk for Build quality.
+
+## Post-deploy verification
+
+- Coolify deployment `dwc7b2jjkffyboiq50fuf3eo` finished successfully at 2026-09-09T09:58:51Z for application `vp0u3pb8vi1v2a01j1z5azso`; the application reported `running:healthy`.
+- Serving image: `ghcr.io/ohld/grok2api:sha-7c9d761c05b7699f400266118214bbbabb32a2ba`, manifest digest `sha256:aeddf88ccb3da415c0317114a8f48868491028b6954201244e1506ddf8d1c8c7`. Rollback is the prior immutable tag `ghcr.io/ohld/grok2api:sha-6d5f9a093bb0d00bb40802f443c49b99c9a83fb7`; no schema migration ran.
+- Gateway checks after rollout: `/healthz` HTTP 200 with `{"ok":true}`; `/readyz` HTTP 200 with Console and model routes ready. Readiness remained degraded only for unavailable Build, Statsig warmup, and the pre-existing accounting worker heartbeat mismatch.
+- Post-deploy Console tool-call check used synthetic trace marker `postdeploy-c3-toolcall-20260909`: HTTP 200, model `grok-4.5`, `finish_reason=tool_calls`, one tool call, no error.
+- Post-deploy Web image check used synthetic trace marker `postdeploy-web-image-20260909`: HTTP 200, one image URL, no error.
+- CheapAIAPI product check used the existing internal-test key through `https://cheapaiapi.org/v1/images/generations` with model `grok-image`: HTTP 200, Job `ccdb4b41-d47e-466d-af13-305102421830` returned `done` with one image URL. Narrow `cheap-ops job` readback confirmed `status=done`, `model=grok-image`, and no error code.
+- The full `production_e2e_canary.py --images-only` preflight was blocked before submitting its canaries by the existing readiness condition `fixed-catalog repair worker is degraded:release_mismatch_heartbeat:1`; the direct internal-test Grok Image request above still completed successfully.
