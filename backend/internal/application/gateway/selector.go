@@ -837,6 +837,7 @@ func (s *Selector) AcquirePinnedForQualityProbe(ctx context.Context, provider ac
 }
 
 func (s *Selector) acquirePinned(ctx context.Context, provider account.Provider, accountID, modelRouteID uint64, upstreamModel, quotaMode string, inference, ignoreEgressLeaseBlock bool, requestedScope clientkeydomain.AccountScope) (lease *accountLease, err error) {
+	ctx = context.WithValue(ctx, pinnedClaimKey{}, true)
 	accountScope, scopeValid := clientkeydomain.NormalizeAccountScope(requestedScope)
 	defer annotateSelectionAccountScope(&err, accountScope)
 	if !scopeValid || !accountScope.AllowsProvider(provider) {
@@ -2094,7 +2095,9 @@ func (s *Selector) claimAccountSlotTracked(ctx context.Context, value account.Cr
 	load := s.nodeLoadLocked(value.EgressNodeID)
 	if load != nil {
 		load.active++
-		load.lastSelected = selectedAt
+		if ctx.Value(pinnedClaimKey{}) == nil {
+			load.lastSelected = selectedAt
+		}
 	}
 	s.selectionMu.Unlock()
 	return &accountLease{Credential: value, release: func() {
@@ -2221,14 +2224,17 @@ func webTierInOrder(order []account.WebTier, tier account.WebTier) bool {
 	return false
 }
 
-// nodeLoad tracks leases per egress node. Grok throttles per IP, so accounts
-// on the least busy (then least recently picked) node go first; the
-// round-robin on lastSelected also spreads job-creation bursts, whose
-// selection lease is released before the job runs.
+// nodeLoad tracks picks and leases per egress node. Grok throttles per IP, so
+// fresh picks round-robin across nodes (least recently picked first, then
+// fewest active leases). A video job's selection lease is released before the
+// job runs, so lease counts alone would pile a creation burst onto one node;
+// the job's pinned re-acquire must not advance the round-robin clock.
 type nodeLoad struct {
 	active       int
 	lastSelected time.Time
 }
+
+type pinnedClaimKey struct{}
 
 func (s *Selector) nodeLoadLocked(nodeID uint64) *nodeLoad {
 	if nodeID == 0 {

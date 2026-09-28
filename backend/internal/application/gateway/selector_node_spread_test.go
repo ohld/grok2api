@@ -43,13 +43,30 @@ func TestSelectorSpreadsWebAccountsAcrossEgressNodes(t *testing.T) {
 	}
 	first.Release()
 	second.Release()
-	// Released at once (job-creation burst): alternate by node pick time.
-	var nodes []uint64
-	for range 4 {
+	// Job-creation burst: each selection lease is released at once and the
+	// job later re-acquires its account pinned and holds it while it runs.
+	// Here job 3 is created before job 2's pinned claim lands.
+	pinned := context.WithValue(ctx, pinnedClaimKey{}, true)
+	create := func() account.Credential {
 		lease := pick()
-		nodes = append(nodes, lease.Credential.EgressNodeID)
 		lease.Release()
+		return lease.Credential
 	}
+	run := func(credential account.Credential) {
+		lease, err := selector.claimAccountSlot(pinned, credential)
+		if err != nil || lease == nil {
+			t.Fatalf("pinned claim %d: %v", credential.ID, err)
+		}
+		t.Cleanup(lease.Release)
+	}
+	job1 := create()
+	run(job1)
+	job2 := create()
+	job3 := create()
+	run(job2)
+	run(job3)
+	job4 := create()
+	nodes := []uint64{job1.EgressNodeID, job2.EgressNodeID, job3.EgressNodeID, job4.EgressNodeID}
 	for i := 1; i < len(nodes); i++ {
 		if nodes[i] == nodes[i-1] {
 			t.Fatalf("burst picks did not alternate nodes: %v", nodes)
