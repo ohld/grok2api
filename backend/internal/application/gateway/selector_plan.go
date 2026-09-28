@@ -110,11 +110,11 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 	if left.Priority != right.Priority {
 		return left.Priority > right.Priority
 	}
-	if leftScore.nodeActive != rightScore.nodeActive {
-		return leftScore.nodeActive < rightScore.nodeActive
-	}
 	if !leftScore.nodeLastSelected.Equal(rightScore.nodeLastSelected) {
 		return leftScore.nodeLastSelected.Before(rightScore.nodeLastSelected)
+	}
+	if leftScore.nodeActive != rightScore.nodeActive {
+		return leftScore.nodeActive < rightScore.nodeActive
 	}
 	if leftScore.billingFresh != rightScore.billingFresh {
 		return leftScore.billingFresh
