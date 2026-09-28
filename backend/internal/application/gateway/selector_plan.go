@@ -23,6 +23,8 @@ type candidateScore struct {
 	inFlight          int
 	remaining         float64
 	lastSelected      time.Time
+	nodeActive        int
+	nodeLastSelected  time.Time
 }
 
 // candidatePlan 使用线性建堆保留完整路由优先级，并允许 claim 失败后按顺序取下一账号。
@@ -107,6 +109,12 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 	}
 	if left.Priority != right.Priority {
 		return left.Priority > right.Priority
+	}
+	if leftScore.nodeActive != rightScore.nodeActive {
+		return leftScore.nodeActive < rightScore.nodeActive
+	}
+	if !leftScore.nodeLastSelected.Equal(rightScore.nodeLastSelected) {
+		return leftScore.nodeLastSelected.Before(rightScore.nodeLastSelected)
 	}
 	if leftScore.billingFresh != rightScore.billingFresh {
 		return leftScore.billingFresh
@@ -211,6 +219,9 @@ func (s *Selector) planCandidateIndexesWithHints(ctx context.Context, values []a
 			imageProFair:      candidate.Credential.Provider == account.ProviderWeb && candidate.QuotaWindow != nil && candidate.QuotaWindow.Mode == account.QuotaModeWebImagePro && candidate.QuotaWindow.Source == account.QuotaSourceUpstream,
 			preferFreeBuild:   preferFreeBuild && candidate.IsKnownFreeBuild(),
 			inFlight:          inFlight[position], lastSelected: s.lastSelectedAt[candidate.Credential.ID],
+		}
+		if load := s.nodeLoads[candidate.Credential.EgressNodeID]; load != nil && candidate.Credential.Provider == account.ProviderWeb {
+			score.nodeActive, score.nodeLastSelected = load.active, load.lastSelected
 		}
 		// 只有真实上游快照能够证明账号具备该模式额度。历史默认值和
 		// 本地预测值都属于未知能力，只保留为路由兜底。
