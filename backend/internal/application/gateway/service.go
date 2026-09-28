@@ -2151,7 +2151,7 @@ func (s *Service) applyRateLimitReconciliation(ctx context.Context, credential a
 	if reconcileErr == nil && state == accountapp.RateLimitReconcileExhausted {
 		return
 	}
-	if credential.Provider == accountdomain.ProviderConsole && status == http.StatusTooManyRequests {
+	if (credential.Provider == accountdomain.ProviderConsole || credential.Provider == accountdomain.ProviderWeb) && status == http.StatusTooManyRequests {
 		// A Console 429 with available quota, an in-progress cross-instance probe,
 		// or an inconclusive /usage request is transient. Isolate the account for
 		// this Retry-After window without growing its durable failure count.

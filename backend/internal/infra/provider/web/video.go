@@ -309,6 +309,10 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	// egress retry) must not hold the node for a full spacing interval.
 	if status, ok := provider.ErrorHTTPStatus(err); (err == nil && (response.StatusCode < http.StatusMultipleChoices || response.StatusCode == http.StatusTooManyRequests)) || (ok && status == http.StatusTooManyRequests) {
 		pace.started()
+		if status == http.StatusTooManyRequests || (err == nil && response.StatusCode == http.StatusTooManyRequests) {
+			// The IP is throttled: retries should try other nodes, not hammer this one.
+			pace.backoff(webVideoThrottleBackoff)
+		}
 	}
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
@@ -658,6 +662,19 @@ func (p *videoPacer) acquire(ctx context.Context, nodeID uint64, spacing time.Du
 }
 
 func (t *videoPaceTicket) started() { t.didStart = true }
+
+// webVideoThrottleBackoff delays the next start on a node after Grok 429s it.
+// ponytail: fixed penalty; make it a runtime setting if one minute is wrong.
+var webVideoThrottleBackoff = time.Minute
+
+// backoff holds the node's next start at least d from now.
+func (t *videoPaceTicket) backoff(d time.Duration) {
+	t.node.mu.Lock()
+	if until := time.Now().Add(d); t.node.lastStart.Before(until) {
+		*t.node.lastStart = until
+	}
+	t.node.mu.Unlock()
+}
 
 func (t *videoPaceTicket) release() {
 	if !t.didStart {
