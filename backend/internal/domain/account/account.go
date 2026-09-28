@@ -106,7 +106,7 @@ type BuildRouteMode string
 
 // CurrentWebTermsVersion 是 Grok Web 当前要求接受的产品服务协议版本。
 // accounts.x.ai 的账号协议使用独立版本，不与该值混用。
-const CurrentWebTermsVersion = 5
+const CurrentWebTermsVersion = 6
 
 const (
 	BuildRouteAuto  BuildRouteMode = "auto"

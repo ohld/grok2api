@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -52,7 +54,7 @@ func (a *Adapter) AcceptTerms(ctx context.Context, credential account.Credential
 	if err != nil {
 		return err
 	}
-	return a.runWebAccountSettings(ctx, credential,
+	err = a.runWebAccountSettings(ctx, credential,
 		webAccountSettingRequest{
 			endpoint:    accountBaseURL + "/auth_mgmt.AuthManagement/SetTosAcceptedVersion",
 			body:        acceptTermsBody,
@@ -72,7 +74,87 @@ func (a *Adapter) AcceptTerms(ctx context.Context, credential account.Credential
 			statsig:     true,
 			clientHints: true,
 		},
+		// Since ToS v6 (2026-09-28) grok.com only lifts /tos-gate through a
+		// Next.js server action; until then Imagine video answers 403
+		// "7: This page is out of date".
+		webAccountSettingRequest{
+			endpoint:      webBaseURL + "/tos-gate",
+			contentType:   "text/plain;charset=UTF-8",
+			origin:        webBaseURL,
+			referer:       webBaseURL + "/tos-gate",
+			tosGateAction: true,
+		},
 	)
+	if err != nil {
+		a.log().Warn("web_accept_terms_failed", "account_id", credential.ID, "error", err)
+	}
+	return err
+}
+
+var tosGateActionPattern = regexp.MustCompile(`createServerReference\)\("([0-9a-f]{40,})",[^;]{0,200}?"setTosAcceptedVersion"`)
+var nextChunkPattern = regexp.MustCompile(`/_next/static/chunks/[A-Za-z0-9_\-./]+\.js`)
+
+// tosGateAction caches the setTosAcceptedVersion server action id. The id
+// changes with each grok.com deploy, so it is rediscovered from the page's
+// JS chunks after a failure.
+type tosGateAction struct {
+	mu sync.Mutex
+	id string
+}
+
+func (a *Adapter) tosGateActionID(ctx context.Context, token string, lease *infraegress.Lease, baseURL string) (string, error) {
+	a.tosGate.mu.Lock()
+	defer a.tosGate.mu.Unlock()
+	if a.tosGate.id != "" {
+		return a.tosGate.id, nil
+	}
+	// The page goes through the account's egress; the public static chunks
+	// are fetched directly to save proxy traffic and time.
+	fetch := func(target string, limit int64, viaLease bool) ([]byte, error) {
+		requestCtx, cancel := context.WithTimeout(ctx, webAccountSettingTimeout)
+		defer cancel()
+		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		var response *http.Response
+		if viaLease {
+			request.Header = buildHeaders(token, lease, "")
+			request.Header.Set("Accept", "*/*")
+			response, err = lease.Do(request)
+		} else {
+			request.Header.Set("User-Agent", lease.UserAgent)
+			response, err = http.DefaultClient.Do(request)
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GET %s 返回 %d", target, response.StatusCode)
+		}
+		return io.ReadAll(io.LimitReader(response.Body, limit))
+	}
+	page, err := fetch(baseURL+"/tos-gate", 4<<20, true)
+	if err != nil {
+		return "", err
+	}
+	seen := map[string]bool{}
+	for _, chunk := range nextChunkPattern.FindAllString(string(page), -1) {
+		if seen[chunk] {
+			continue
+		}
+		seen[chunk] = true
+		body, err := fetch(baseURL+chunk, 8<<20, false)
+		if err != nil {
+			continue
+		}
+		if match := tosGateActionPattern.FindSubmatch(body); match != nil {
+			a.tosGate.id = string(match[1])
+			return a.tosGate.id, nil
+		}
+	}
+	return "", fmt.Errorf("未在 grok.com 页面脚本中找到 setTosAcceptedVersion")
 }
 
 // SetBirthDate 设置 Grok Web 账号生日。上游接收 RFC3339 字符串；日期由应用层生成。
@@ -127,6 +209,8 @@ type webAccountSettingRequest struct {
 	statsig     bool
 	clientHints bool
 	withoutCF   bool
+	// tosGateAction posts {tosVersion} as the /tos-gate Next.js server action.
+	tosGateAction bool
 }
 
 func (a *Adapter) runWebAccountSetting(ctx context.Context, credential account.Credential, input webAccountSettingRequest) error {
@@ -182,6 +266,18 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 		if input.statsig {
 			a.applySignedStatsig(requestCtx, request, token, lease)
 		}
+		if input.tosGateAction {
+			actionID, err := a.tosGateActionID(ctx, token, lease, strings.TrimSuffix(input.endpoint, "/tos-gate"))
+			if err != nil {
+				cancel()
+				return err
+			}
+			body := fmt.Sprintf(`[{"tosVersion":%d}]`, account.CurrentWebTermsVersion)
+			request.Body = io.NopCloser(strings.NewReader(body))
+			request.ContentLength = int64(len(body))
+			request.Header.Set("Accept", "text/x-component")
+			request.Header.Set("Next-Action", actionID)
+		}
 
 		response, requestErr := lease.Do(request)
 		if requestErr != nil {
@@ -195,7 +291,9 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 		if readErr != nil {
 			return readErr
 		}
-		if len(body) > webAccountSettingBodyLimit {
+		// The server action answers with the re-rendered RSC page, which is
+		// larger than any settings reply; only its status matters.
+		if len(body) > webAccountSettingBodyLimit && !input.tosGateAction {
 			return fmt.Errorf("Grok Web 账号设置响应超过安全上限")
 		}
 		if response.StatusCode == http.StatusForbidden && input.statsig && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, input.endpoint) {
@@ -206,6 +304,11 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 			return provider.ErrUnauthorized
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if input.tosGateAction {
+				a.tosGate.mu.Lock()
+				a.tosGate.id = ""
+				a.tosGate.mu.Unlock()
+			}
 			return newWebAccountSettingError(response.StatusCode, body)
 		}
 		if input.grpcWeb {
