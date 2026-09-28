@@ -465,6 +465,7 @@ func webProviderConfig(cfg config.Config) webprovider.Config {
 		VideoTimeoutSeconds: int(cfg.Provider.Web.VideoTimeout.Value().Seconds()), MaxInputImageBytes: cfg.Media.MaxImageBytes,
 		AllowNSFW:            cfg.Provider.Web.AllowNSFW,
 		FreeVideoDurationCap: cfg.Provider.Web.FreeVideoDurationCap,
+		VideoNodeSpacing:     cfg.Provider.Web.VideoNodeSpacing.Value(),
 	}
 }
 

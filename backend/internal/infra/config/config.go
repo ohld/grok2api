@@ -180,8 +180,11 @@ type WebProviderConfig struct {
 	MediaConcurrency     int      `yaml:"mediaConcurrency"`
 	AllowNSFW            bool     `yaml:"allowNSFW"`
 	FreeVideoDurationCap int      `yaml:"freeVideoDurationCap"`
-	RecoveryBackoffBase  Duration `yaml:"recoveryBackoffBase"`
-	RecoveryBackoffMax   Duration `yaml:"recoveryBackoffMax"`
+	// VideoNodeSpacing is the minimum gap between Web video starts on one
+	// egress node; Grok throttles an IP after a few videos per hour. 0 disables.
+	VideoNodeSpacing    Duration `yaml:"videoNodeSpacing"`
+	RecoveryBackoffBase Duration `yaml:"recoveryBackoffBase"`
+	RecoveryBackoffMax  Duration `yaml:"recoveryBackoffMax"`
 }
 
 type ConsoleProviderConfig struct {
@@ -907,8 +910,8 @@ func defaultConfig() Config {
 				ClearanceTimeout: Duration(time.Minute), ClearanceRefresh: Duration(10 * time.Minute),
 				QuotaTimeout: Duration(25 * time.Second),
 				ChatTimeout:  Duration(2 * time.Minute), StreamIdleTimeout: Duration(settingsdomain.DefaultWebStreamIdleTimeout),
-				ImageTimeout:     Duration(3 * time.Minute),
-				VideoTimeout:     Duration(15 * time.Minute),
+				ImageTimeout: Duration(3 * time.Minute),
+				VideoTimeout: Duration(15 * time.Minute), VideoNodeSpacing: Duration(15 * time.Minute),
 				MediaConcurrency: 4, FreeVideoDurationCap: settingsdomain.DefaultWebFreeVideoDurationCap, RecoveryBackoffBase: Duration(30 * time.Second),
 				RecoveryBackoffMax: Duration(30 * time.Minute),
 			},
