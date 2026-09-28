@@ -272,7 +272,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	defer lease.Release()
-	pace, err := a.videoPacer.acquire(ctx, lease.NodeID, cfg.VideoNodeSpacing)
+	pace, err := a.videoPacer.acquire(ctx, lease.NodeID, cfg.VideoNodeSpacing, cfg.VideoNodeConcurrency)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
@@ -590,54 +590,85 @@ func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credentia
 	return seconds
 }
 
-// videoPacer runs at most one Web video per egress node and spaces starts on
+// videoPacer caps concurrent Web videos per egress node and spaces starts on
 // that node, because Grok answers bursts from one IP with 429 code 8.
 // ponytail: in-process only; a second replica would need a shared lock.
 type videoPacer struct {
 	mu    sync.Mutex
-	nodes map[uint64]*videoPaceSlot
+	nodes map[uint64]*videoPaceNode
 }
 
-type videoPaceSlot struct {
+type videoPaceNode struct {
 	gate      chan struct{}
-	lastStart time.Time
+	lastStart *time.Time // shared across gate swaps
+	mu        *sync.Mutex
 }
 
-// acquire waits for the node's slot and spacing. Only a create that upstream
-// accepted (started) counts toward spacing, so fast local failures and the
-// egress 403 retry do not wait a full interval.
-func (p *videoPacer) acquire(ctx context.Context, nodeID uint64, spacing time.Duration) (*videoPaceSlot, error) {
+// videoPaceTicket is one holder's reserved start on a node.
+type videoPaceTicket struct {
+	node        *videoPaceNode
+	start, prev time.Time
+	didStart    bool
+}
+
+// acquire waits for a free slot on the node, then reserves the next start
+// time (spacing after the previous start) and sleeps until it. Only a create
+// that upstream accepted (started) keeps its reservation, so fast local
+// failures and the egress 403 retry do not push the next start back.
+func (p *videoPacer) acquire(ctx context.Context, nodeID uint64, spacing time.Duration, concurrency int) (*videoPaceTicket, error) {
+	concurrency = max(1, concurrency)
 	p.mu.Lock()
 	if p.nodes == nil {
-		p.nodes = map[uint64]*videoPaceSlot{}
+		p.nodes = map[uint64]*videoPaceNode{}
 	}
-	slot := p.nodes[nodeID]
-	if slot == nil {
-		slot = &videoPaceSlot{gate: make(chan struct{}, 1)}
-		p.nodes[nodeID] = slot
+	node := p.nodes[nodeID]
+	if node == nil || cap(node.gate) != concurrency {
+		// A concurrency change swaps the gate; running videos release the old one.
+		next := &videoPaceNode{gate: make(chan struct{}, concurrency), lastStart: new(time.Time), mu: new(sync.Mutex)}
+		if node != nil {
+			next.lastStart, next.mu = node.lastStart, node.mu
+		}
+		node = next
+		p.nodes[nodeID] = node
 	}
 	p.mu.Unlock()
 	select {
-	case slot.gate <- struct{}{}:
+	case node.gate <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	if wait := time.Until(slot.lastStart.Add(spacing)); wait > 0 {
+	node.mu.Lock()
+	ticket := &videoPaceTicket{node: node, prev: *node.lastStart, start: time.Now()}
+	if next := ticket.prev.Add(spacing); next.After(ticket.start) {
+		ticket.start = next
+	}
+	*node.lastStart = ticket.start
+	node.mu.Unlock()
+	if wait := time.Until(ticket.start); wait > 0 {
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			<-slot.gate
+			ticket.release()
 			return nil, ctx.Err()
 		}
 	}
-	return slot, nil
+	return ticket, nil
 }
 
-func (s *videoPaceSlot) started() { s.lastStart = time.Now() }
+func (t *videoPaceTicket) started() { t.didStart = true }
 
-func (s *videoPaceSlot) release() { <-s.gate }
+func (t *videoPaceTicket) release() {
+	if !t.didStart {
+		t.node.mu.Lock()
+		if t.node.lastStart.Equal(t.start) {
+			*t.node.lastStart = t.prev
+		}
+		t.node.mu.Unlock()
+	}
+	<-t.node.gate
+}
 
 func trimNonEmpty(values []string) []string {
 	out := make([]string, 0, len(values))

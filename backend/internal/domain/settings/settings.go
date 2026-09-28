@@ -83,6 +83,10 @@ type ProviderWebConfig struct {
 	MediaConcurrency     int
 	AllowNSFW            bool
 	FreeVideoDurationCap int
+	// VideoNodeSpacing/VideoNodeConcurrency pace Web video per egress node;
+	// zero means "use the file/default value".
+	VideoNodeSpacing     time.Duration
+	VideoNodeConcurrency int
 	RecoveryBackoffBase  time.Duration
 	RecoveryBackoffMax   time.Duration
 }

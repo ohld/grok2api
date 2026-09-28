@@ -61,6 +61,7 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	input.ProviderWeb.ClearanceProvided = true
 	input.ProviderWeb.ClearanceMode = config.ClearanceModeOnDemand
 	input.ProviderWeb.FlareSolverrURL = "http://flaresolverr:8191"
+	input.ProviderWeb.VideoNodeSpacing, input.ProviderWeb.VideoNodeConcurrency, input.ProviderWeb.VideoPacingProvided = "2m", 2, true
 	input.Batch = BatchConfig{ImportConcurrency: 26, ConversionConcurrency: 27, SyncConcurrency: 28, RefreshConcurrency: 29, RandomDelay: "750ms"}
 
 	snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
@@ -101,7 +102,10 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	if reloaded.Server.MaxConcurrentRequests != 2048 || reloaded.Provider.Build.ResponseHeaderTimeout.Value() != 7*time.Minute || reloaded.Routing.MaxAttempts != 5 || !reloaded.Routing.PreferFreeBuild || !reloaded.Routing.SegmentedSelectorEnabled || reloaded.Routing.SegmentedMinCandidates != 5000 || reloaded.Routing.SegmentedWindowSize != 96 || reloaded.Audit.BufferSize != input.Audit.BufferSize || reloaded.Media.MaxTotalBytes != 2<<30 || reloaded.Media.CleanupThresholdPercent != 75 || reloaded.Batch.SyncConcurrency != 28 || reloaded.Batch.RandomDelay.Value() != 750*time.Millisecond || reloaded.Provider.Console.BaseURL != "https://console.example.com" || reloaded.Provider.Web.ClearanceMode != config.ClearanceModeOnDemand {
 		t.Fatalf("configuration was not persisted")
 	}
-	if reloaded.Provider.Web.VideoNodeSpacing.Value() == 0 || reloaded.Provider.Web.VideoNodeSpacing != cfg.Provider.Web.VideoNodeSpacing {
+	if applied.Provider.Web.VideoNodeSpacing.Value() != 2*time.Minute || applied.Provider.Web.VideoNodeConcurrency != 2 {
+		t.Fatalf("Web video pacing was not applied: %s x%d", applied.Provider.Web.VideoNodeSpacing.Value(), applied.Provider.Web.VideoNodeConcurrency)
+	}
+	if reloaded.Provider.Web.VideoNodeSpacing.Value() != 2*time.Minute || reloaded.Provider.Web.VideoNodeConcurrency != 2 {
 		t.Fatalf("Web video node spacing was dropped on reload: %s", reloaded.Provider.Web.VideoNodeSpacing.Value())
 	}
 }

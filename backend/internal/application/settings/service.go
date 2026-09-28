@@ -55,6 +55,9 @@ type ProviderWebConfig struct {
 	AllowNSFW                    bool
 	FreeVideoDurationCap         int
 	FreeVideoDurationCapProvided bool
+	VideoNodeSpacing             string
+	VideoNodeConcurrency         int
+	VideoPacingProvided          bool
 	RecoveryBackoffBase          string
 	RecoveryBackoffMax           string
 	// ClearanceProvided distinguishes older admin clients that predate the
@@ -356,8 +359,14 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 		FreeVideoDurationCap: settingsdomain.NormalizeWebFreeVideoDurationCap(freeVideoDurationCap),
 		RecoveryBackoffBase:  config.Duration(value.ProviderWeb.RecoveryBackoffBase), RecoveryBackoffMax: config.Duration(value.ProviderWeb.RecoveryBackoffMax),
-		// Not a runtime setting yet: keep the file/default value across reloads.
-		VideoNodeSpacing: base.Provider.Web.VideoNodeSpacing,
+		VideoNodeSpacing:     base.Provider.Web.VideoNodeSpacing,
+		VideoNodeConcurrency: base.Provider.Web.VideoNodeConcurrency,
+	}
+	if value.ProviderWeb.VideoNodeSpacing > 0 {
+		base.Provider.Web.VideoNodeSpacing = config.Duration(value.ProviderWeb.VideoNodeSpacing)
+	}
+	if value.ProviderWeb.VideoNodeConcurrency > 0 {
+		base.Provider.Web.VideoNodeConcurrency = value.ProviderWeb.VideoNodeConcurrency
 	}
 	if value.ProviderWeb.StreamIdleTimeout <= 0 {
 		base.Provider.Web.StreamIdleTimeout = config.Duration(settingsdomain.DefaultWebStreamIdleTimeout)
@@ -467,7 +476,8 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			VideoTimeout:     value.Provider.Web.VideoTimeout.Value(),
 			MediaConcurrency: value.Provider.Web.MediaConcurrency, AllowNSFW: value.Provider.Web.AllowNSFW,
 			FreeVideoDurationCap: settingsdomain.NormalizeWebFreeVideoDurationCap(value.Provider.Web.FreeVideoDurationCap),
-			RecoveryBackoffBase:  value.Provider.Web.RecoveryBackoffBase.Value(), RecoveryBackoffMax: value.Provider.Web.RecoveryBackoffMax.Value(),
+			VideoNodeSpacing:     value.Provider.Web.VideoNodeSpacing.Value(), VideoNodeConcurrency: value.Provider.Web.VideoNodeConcurrency,
+			RecoveryBackoffBase: value.Provider.Web.RecoveryBackoffBase.Value(), RecoveryBackoffMax: value.Provider.Web.RecoveryBackoffMax.Value(),
 		},
 		ProviderConsole: settingsdomain.ProviderConsoleConfig{
 			BaseURL: value.Provider.Console.BaseURL, ChatTimeout: value.Provider.Console.ChatTimeout.Value(),
@@ -567,6 +577,14 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	next.Provider.Web.AllowNSFW = input.ProviderWeb.AllowNSFW
 	if input.ProviderWeb.FreeVideoDurationCapProvided {
 		next.Provider.Web.FreeVideoDurationCap = settingsdomain.NormalizeWebFreeVideoDurationCap(input.ProviderWeb.FreeVideoDurationCap)
+	}
+	if input.ProviderWeb.VideoPacingProvided {
+		spacing, err := time.ParseDuration(strings.TrimSpace(input.ProviderWeb.VideoNodeSpacing))
+		if err != nil || spacing < time.Second || spacing > 24*time.Hour || input.ProviderWeb.VideoNodeConcurrency < 1 || input.ProviderWeb.VideoNodeConcurrency > 16 {
+			return config.Config{}, errors.New("providerWeb.videoNodeSpacing 须在 1s-24h，videoNodeConcurrency 须在 1-16")
+		}
+		next.Provider.Web.VideoNodeSpacing = config.Duration(spacing)
+		next.Provider.Web.VideoNodeConcurrency = input.ProviderWeb.VideoNodeConcurrency
 	}
 	next.Provider.Console.BaseURL = strings.TrimSpace(input.ProviderConsole.BaseURL)
 	next.Batch = config.BatchConfig{
@@ -704,7 +722,9 @@ func toEditable(cfg config.Config) EditableConfig {
 			MediaConcurrency: cfg.Provider.Web.MediaConcurrency, AllowNSFW: cfg.Provider.Web.AllowNSFW,
 			FreeVideoDurationCap:         settingsdomain.NormalizeWebFreeVideoDurationCap(cfg.Provider.Web.FreeVideoDurationCap),
 			FreeVideoDurationCapProvided: true,
-			RecoveryBackoffBase:          cfg.Provider.Web.RecoveryBackoffBase.String(), RecoveryBackoffMax: cfg.Provider.Web.RecoveryBackoffMax.String(),
+			VideoNodeSpacing:             cfg.Provider.Web.VideoNodeSpacing.String(), VideoNodeConcurrency: cfg.Provider.Web.VideoNodeConcurrency,
+			VideoPacingProvided: true,
+			RecoveryBackoffBase: cfg.Provider.Web.RecoveryBackoffBase.String(), RecoveryBackoffMax: cfg.Provider.Web.RecoveryBackoffMax.String(),
 		},
 		ProviderConsole: ProviderConsoleConfig{
 			BaseURL: cfg.Provider.Console.BaseURL, ChatTimeout: cfg.Provider.Console.ChatTimeout.String(),
