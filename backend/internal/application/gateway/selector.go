@@ -364,6 +364,8 @@ type Selector struct {
 	leaseWakeMu            sync.Mutex
 	leaseWake              chan struct{}
 	lastSelectedAt         map[uint64]time.Time
+	// nodeLoads spreads accounts across egress IPs; guarded by selectionMu.
+	nodeLoads              map[uint64]*nodeLoad
 	lastSuccessAt          map[uint64]time.Time
 	healthOverrides        map[uint64]routingHealthOverride
 	quotaConsumed          map[quotaConsumptionKey]int
@@ -2087,9 +2089,20 @@ func (s *Selector) claimAccountSlotTracked(ctx context.Context, value account.Cr
 		value = hydrated
 	}
 	s.selectionMu.Lock()
-	s.lastSelectedAt[value.ID] = time.Now().UTC()
+	selectedAt := time.Now().UTC()
+	s.lastSelectedAt[value.ID] = selectedAt
+	load := s.nodeLoadLocked(value.EgressNodeID)
+	if load != nil {
+		load.active++
+		load.lastSelected = selectedAt
+	}
 	s.selectionMu.Unlock()
 	return &accountLease{Credential: value, release: func() {
+		if load != nil {
+			s.selectionMu.Lock()
+			load.active--
+			s.selectionMu.Unlock()
+		}
 		releaseSlot()
 	}}, nil
 }
@@ -2206,4 +2219,28 @@ func webTierInOrder(order []account.WebTier, tier account.WebTier) bool {
 		}
 	}
 	return false
+}
+
+// nodeLoad tracks leases per egress node. Grok throttles per IP, so accounts
+// on the least busy (then least recently picked) node go first; the
+// round-robin on lastSelected also spreads job-creation bursts, whose
+// selection lease is released before the job runs.
+type nodeLoad struct {
+	active       int
+	lastSelected time.Time
+}
+
+func (s *Selector) nodeLoadLocked(nodeID uint64) *nodeLoad {
+	if nodeID == 0 {
+		return nil
+	}
+	if s.nodeLoads == nil {
+		s.nodeLoads = make(map[uint64]*nodeLoad)
+	}
+	load := s.nodeLoads[nodeID]
+	if load == nil {
+		load = &nodeLoad{}
+		s.nodeLoads[nodeID] = load
+	}
+	return load
 }
