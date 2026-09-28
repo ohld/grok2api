@@ -1431,3 +1431,43 @@ func (a *quotaCountingAdapter) SyncQuotaMode(_ context.Context, credential accou
 		WindowSeconds: 3600, ResetAt: &resetAt, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream, UpdatedAt: now,
 	}, nil
 }
+
+func TestReconcileWebVideoRateLimitKeepsQuotaWhenProbeFails(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "web-video-rate-limit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		Name: "web-video-429", SourceKey: "web-video-429", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := accounts.ReplaceQuotaWindows(ctx, credential.ID, "", now, []accountdomain.QuotaWindow{
+		{Mode: accountdomain.QuotaModeWebVideo720p, Remaining: 1, Total: 1, SyncedAt: &now, Source: accountdomain.QuotaSourceUpstream},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Grok 429 code 8 throttles the IP; with no working quota probe the
+	// account must keep its last upstream snapshot instead of being zeroed.
+	service := NewService(accounts, nil, nil, nil, provider.NewRegistry(), nil, nil)
+	if state, err := service.ReconcileRateLimit(ctx, credential.ID, accountdomain.QuotaModeWebVideo720p, 0); err == nil || state != RateLimitReconcileInconclusive {
+		t.Fatalf("state=%s err=%v", state, err)
+	}
+	stored, err := accounts.GetQuotaWindows(ctx, []uint64{credential.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window, ok := quotaWindowByMode(stored[credential.ID], accountdomain.QuotaModeWebVideo720p); !ok || window.Remaining != 1 {
+		t.Fatalf("IP throttle zeroed video quota: %#v", window)
+	}
+}

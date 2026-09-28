@@ -85,3 +85,23 @@ func TestDecoyVideoTiming(t *testing.T) {
 		t.Fatal("a 3s finish is a decoy, a 55s render is not")
 	}
 }
+
+func TestVideoPacerBackoffHoldsThrottledNode(t *testing.T) {
+	var pacer videoPacer
+	throttled, err := pacer.acquire(context.Background(), 7, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	throttled.started()
+	throttled.backoff(150 * time.Millisecond)
+	throttled.release()
+	began := time.Now()
+	next, err := pacer.acquire(context.Background(), 7, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.release()
+	if waited := time.Since(began); waited < 100*time.Millisecond {
+		t.Fatalf("waited %v after a 429, want the backoff", waited)
+	}
+}

@@ -3052,7 +3052,9 @@ func preserveActiveQuotaWindows(existing, incoming []accountdomain.QuotaWindow, 
 // 均以上游快照为准；Console 的 resource-exhausted 还可能表示瞬时
 // RPS/RPM 限流，不能在未查询 /usage 时直接将账号冻结 24 小时。
 func (s *Service) ReconcileRateLimit(ctx context.Context, id uint64, mode string, retryAfter time.Duration) (RateLimitReconcileState, error) {
-	if mode == "weekly" || isConsoleUsageQuotaMode(mode) {
+	// Web imagine 429 (code 8) is usually a per-IP throttle, not spent quota:
+	// ask upstream instead of zeroing the window for a day.
+	if mode == "weekly" || isConsoleUsageQuotaMode(mode) || isWebImagineQuotaMode(mode) {
 		var window accountdomain.QuotaWindow
 		var err error
 		if isConsoleUsageQuotaMode(mode) {
