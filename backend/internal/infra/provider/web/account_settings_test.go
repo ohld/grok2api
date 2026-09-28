@@ -28,7 +28,7 @@ func TestWebAccountSettingsMatchCapturedProtocol(t *testing.T) {
 	if err != nil || !bytes.Equal(enableNSFWBody, expectedNSFW) {
 		t.Fatalf("NSFW frame = %x", enableNSFWBody)
 	}
-	var accountTermsSeen, productTermsSeen, birthSeen, nsfwSeen atomic.Bool
+	var accountTermsSeen, productTermsSeen, gateSeen, birthSeen, nsfwSeen atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
 		switch request.URL.Path {
@@ -55,6 +55,22 @@ func TestWebAccountSettingsMatchCapturedProtocol(t *testing.T) {
 			if request.Header.Get("Cookie") != "sso=test-sso; sso-rw=test-sso; cf_clearance=clear" || request.Header.Get("Sec-Ch-Ua") == "" {
 				t.Errorf("product terms browser identity = %#v", request.Header)
 			}
+		case "/tos-gate":
+			if request.Method == http.MethodGet {
+				_, _ = io.WriteString(writer, `<script src="/_next/static/chunks/other.js"></script><script src="/_next/static/chunks/3ay4kzx_wiw5r.js"></script>`)
+				return
+			}
+			gateSeen.Store(true)
+			if request.Header.Get("Next-Action") != "7f086e9b361679414aa1fbb76bed2c073cb1a9dd22" || string(body) != `[{"tosVersion":6}]` {
+				t.Errorf("tos gate action=%q body=%s", request.Header.Get("Next-Action"), body)
+			}
+		case "/_next/static/chunks/other.js":
+			_, _ = io.WriteString(writer, `let a=1;`)
+			return
+		case "/_next/static/chunks/3ay4kzx_wiw5r.js":
+			// Captured from grok.com on 2026-09-28.
+			_, _ = io.WriteString(writer, `let f=(0,x.createServerReference)("7f086e9b361679414aa1fbb76bed2c073cb1a9dd22",x.callServer,void 0,x.findSourceMapURL,"setTosAcceptedVersion");`)
+			return
 		case "/rest/auth/set-birth-date":
 			birthSeen.Store(true)
 			var payload map[string]string
@@ -100,7 +116,7 @@ func TestWebAccountSettingsMatchCapturedProtocol(t *testing.T) {
 	if err := adapter.EnableNSFW(context.Background(), credential); err != nil {
 		t.Fatal(err)
 	}
-	if !accountTermsSeen.Load() || !productTermsSeen.Load() || !birthSeen.Load() || !nsfwSeen.Load() {
+	if !accountTermsSeen.Load() || !productTermsSeen.Load() || !gateSeen.Load() || !birthSeen.Load() || !nsfwSeen.Load() {
 		t.Fatalf("seen accountTerms=%v productTerms=%v birth=%v nsfw=%v", accountTermsSeen.Load(), productTermsSeen.Load(), birthSeen.Load(), nsfwSeen.Load())
 	}
 }

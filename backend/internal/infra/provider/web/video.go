@@ -5,18 +5,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
+	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
 
@@ -251,8 +254,13 @@ func boundWebMediaDiagnostic(value string, limit int) string {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
-	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
+	if len(request.ReferenceAudios) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 暂不支持 reference_audios"))
+	}
+	imageURL := strings.TrimSpace(request.ImageURL)
+	referenceURLs := trimNonEmpty(request.ReferenceURLs)
+	if imageURL != "" && len(referenceURLs) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("image 不能与 reference_images 同时使用"))
 	}
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
@@ -264,6 +272,11 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
 	}
 	defer lease.Release()
+	pace, err := a.videoPacer.acquire(ctx, lease.NodeID, cfg.VideoNodeSpacing)
+	if err != nil {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, err)
+	}
+	defer pace.release()
 	if len(videoSegments(request.Duration)) == 0 {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("duration 必须在 1 到 15 秒之间"))
 	}
@@ -274,8 +287,29 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
+	mediaKey := ""
+	rawAssets := referenceURLs
+	if imageURL != "" {
+		mediaKey = "imageToVideo"
+		rawAssets = []string{imageURL}
+	} else if len(referenceURLs) > 0 {
+		mediaKey = "referenceToVideo"
+	}
+	var inputAssets []string
+	if len(rawAssets) > 0 {
+		inputAssets, err = a.prepareVideoInputAssets(ctx, cfg, lease, token, rawAssets)
+		if err != nil {
+			return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
+		}
+	}
+	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0], inputAssets, mediaKey)
+	createStarted := time.Now()
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	// postJSON returns non-2xx responses without an error; a 403 (statsig or
+	// egress retry) must not hold the node for a full spacing interval.
+	if status, ok := provider.ErrorHTTPStatus(err); (err == nil && (response.StatusCode < http.StatusMultipleChoices || response.StatusCode == http.StatusTooManyRequests)) || (ok && status == http.StatusTooManyRequests) {
+		pace.started()
+	}
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
@@ -294,8 +328,25 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if result.URL == "" {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, fmt.Errorf("视频生成完成但没有返回内容 URL"))
 	}
+	if elapsed := time.Since(createStarted); isDecoyVideoTiming(elapsed) {
+		a.log().Warn("grok web video looks like a risk-control decoy clip", "account_id", request.Credential.ID, "node_id", lease.NodeID, "elapsed", elapsed)
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePoll, 0, fmt.Errorf("%w: finished in %s", errWebVideoDecoy, elapsed.Round(time.Millisecond)))
+	}
 	return result, nil
 }
+
+// errWebVideoDecoy marks a clip that finished too fast to be a real render.
+// Downranked free accounts get a stock 6s scene (lighthouse, lake) that
+// ignores the prompt and first frame but still spends quota (upstream #1053).
+// Real renders take about a minute.
+var errWebVideoDecoy = errors.New("Grok Web returned a stock decoy video")
+
+// Tests with instant fake upstreams lower this to zero.
+var webVideoDecoyReadyWithin = 10 * time.Second
+
+// ponytail: timing heuristic only; add a first-frame similarity check if
+// decoys start taking realistic render time.
+func isDecoyVideoTiming(elapsed time.Duration) bool { return elapsed < webVideoDecoyReadyWithin }
 
 // DownloadVideo retrieves a completed Grok asset through its source SSO
 // session. Direct asset URLs are not public and must not be exposed as a
@@ -539,31 +590,131 @@ func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credentia
 	return seconds
 }
 
+// videoPacer runs at most one Web video per egress node and spaces starts on
+// that node, because Grok answers bursts from one IP with 429 code 8.
+// ponytail: in-process only; a second replica would need a shared lock.
+type videoPacer struct {
+	mu    sync.Mutex
+	nodes map[uint64]*videoPaceSlot
+}
+
+type videoPaceSlot struct {
+	gate      chan struct{}
+	lastStart time.Time
+}
+
+// acquire waits for the node's slot and spacing. Only a create that upstream
+// accepted (started) counts toward spacing, so fast local failures and the
+// egress 403 retry do not wait a full interval.
+func (p *videoPacer) acquire(ctx context.Context, nodeID uint64, spacing time.Duration) (*videoPaceSlot, error) {
+	p.mu.Lock()
+	if p.nodes == nil {
+		p.nodes = map[uint64]*videoPaceSlot{}
+	}
+	slot := p.nodes[nodeID]
+	if slot == nil {
+		slot = &videoPaceSlot{gate: make(chan struct{}, 1)}
+		p.nodes[nodeID] = slot
+	}
+	p.mu.Unlock()
+	select {
+	case slot.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if wait := time.Until(slot.lastStart.Add(spacing)); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			<-slot.gate
+			return nil, ctx.Err()
+		}
+	}
+	return slot, nil
+}
+
+func (s *videoPaceSlot) started() { s.lastStart = time.Now() }
+
+func (s *videoPaceSlot) release() { <-s.gate }
+
+func trimNonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func (a *Adapter) prepareVideoInputAssets(ctx context.Context, cfg Config, lease *egress.Lease, token string, rawURLs []string) ([]string, error) {
+	assets := make([]string, 0, len(rawURLs))
+	for _, rawURL := range rawURLs {
+		image, err := a.loadChatImage(ctx, lease, rawURL, cfg.MaxInputImageBytes)
+		if err != nil {
+			return nil, err
+		}
+		uploaded, err := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "video_reference_upload")
+		if err != nil {
+			return nil, err
+		}
+		if uploaded.MetadataID == "" {
+			return nil, fmt.Errorf("上传视频参考图片成功但上游未返回 fileMetadataId")
+		}
+		assets = append(assets, uploaded.MetadataID)
+	}
+	return assets, nil
+}
+
 // videoCreatePayload mirrors the current Grok Imagine browser request.
-// In particular, the generation parameters belong in mediaGenInput rather
-// than the legacy modelConfigOverride map. Keeping this shape explicit also
-// prevents text-to-video from depending on a synthetic media post.
-func videoCreatePayload(prompt, ratio, resolution string, seconds int) map[string]any {
+// Text uses mediaGenInput.textToVideo. First-frame uses imageToVideo with
+// mode=custom. Reference images use referenceToVideo without mode.
+// None of these paths create a synthetic media post.
+func videoCreatePayload(prompt, ratio, resolution string, seconds int, inputAssets []string, mediaKey string) map[string]any {
+	media := map[string]any{}
+	switch mediaKey {
+	case "imageToVideo":
+		media["imageToVideo"] = map[string]any{
+			"prompt":         prompt,
+			"inputAssets":    inputAssets,
+			"aspectRatio":    ratio,
+			"duration":       seconds,
+			"resolutionName": resolution,
+			"mode":           "custom",
+		}
+	case "referenceToVideo":
+		media["referenceToVideo"] = map[string]any{
+			"prompt":         prompt,
+			"inputAssets":    inputAssets,
+			"aspectRatio":    ratio,
+			"duration":       seconds,
+			"resolutionName": resolution,
+		}
+	default:
+		media["textToVideo"] = map[string]any{
+			"prompt":         prompt,
+			"aspectRatio":    ratio,
+			"duration":       seconds,
+			"resolutionName": resolution,
+		}
+	}
 	return map[string]any{
 		"modelName":            "imagine-video-gen",
 		"message":              prompt + " --mode=custom",
 		"enableImageStreaming": true,
-		"enableSideBySide":     true,
-		"sendFinalMetadata":    true,
+		// Side-by-side makes the browser spend quota twice; keep it only for
+		// the text path that is already proven in production.
+		"enableSideBySide":  mediaKey == "",
+		"sendFinalMetadata": true,
 		"responseMetadata": map[string]any{
 			"experiments": []any{},
 			"modelConfigOverride": map[string]any{
 				"modelMap": map[string]any{},
 			},
 		},
-		"mediaGenInput": map[string]any{
-			"textToVideo": map[string]any{
-				"prompt":         prompt,
-				"aspectRatio":    ratio,
-				"duration":       seconds,
-				"resolutionName": resolution,
-			},
-		},
-		"kind": "CONVERSATION_KIND_IMAGINE",
+		"mediaGenInput": media,
+		"kind":          "CONVERSATION_KIND_IMAGINE",
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
@@ -27,6 +28,7 @@ type Config struct {
 	MaxInputImageBytes       int64
 	AllowNSFW                bool
 	FreeVideoDurationCap     int
+	VideoNodeSpacing         time.Duration
 }
 
 type Adapter struct {
@@ -39,6 +41,8 @@ type Adapter struct {
 	assets          provider.ImageAssetStore
 	statsig         *statsigSigner
 	logger          *slog.Logger
+	videoPacer      videoPacer
+	tosGate         tosGateAction
 }
 
 func NewAdapter(cfg Config, egress *infraegress.Manager, cipher *security.Cipher, states repository.ResponseRepository, assets provider.ImageAssetStore) *Adapter {

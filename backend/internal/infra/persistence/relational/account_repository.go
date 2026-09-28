@@ -543,7 +543,7 @@ func (r *AccountRepository) getRoutingEgressLeaseBlocks(ctx context.Context, pro
 // account to use. Provider secrets deliberately stay in account_credentials
 // until a selected account is hydrated for the upstream call.
 func (r *AccountRepository) listRoutingCredentials(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	rows, err := r.listActiveProviderAccountRows(ctx, provider, routingCredentialMetadataColumns)
+	rows, err := r.listActiveProviderAccountRows(ctx, provider, routingCredentialMetadataColumns, true)
 	if err != nil {
 		return nil, err
 	}
@@ -561,10 +561,17 @@ func (r *AccountRepository) listRoutingCredentials(ctx context.Context, provider
 // provider pools. Preload expands every parent key into an IN list and exceeds
 // SQLite's variable limit for large pools. The fixed-shape JOIN queries below
 // remain valid for both SQLite and PostgreSQL regardless of pool size.
-func (r *AccountRepository) listActiveProviderAccountRows(ctx context.Context, provider account.Provider, credentialColumns []string) ([]accountModel, error) {
+// routableOnly drops accounts pinned to a disabled or cooling egress node:
+// such accounts can only fail, and picking them blocks a healthy fallback.
+func (r *AccountRepository) listActiveProviderAccountRows(ctx context.Context, provider account.Provider, credentialColumns []string, routableOnly bool) ([]accountModel, error) {
 	var rows []accountModel
-	if err := r.db.db.WithContext(ctx).
-		Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).
+	query := r.db.db.WithContext(ctx).
+		Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive)
+	if routableOnly {
+		query = query.Where("egress_node_id IS NULL OR EXISTS (SELECT 1 FROM egress_nodes AS node WHERE node.id = provider_accounts.egress_node_id AND node.enabled = ? AND (node.proxy_pool = ? OR node.cooldown_until IS NULL OR node.cooldown_until <= ?))",
+			true, true, time.Now().UTC())
+	}
+	if err := query.
 		Order("priority DESC, id ASC").
 		Find(&rows).Error; err != nil {
 		return nil, err
@@ -836,7 +843,7 @@ func (r *AccountRepository) listRoutingBoundAccountIDs(ctx context.Context, prov
 }
 
 func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	rows, err := r.listActiveProviderAccountRows(ctx, provider, nil)
+	rows, err := r.listActiveProviderAccountRows(ctx, provider, nil, false)
 	if err != nil {
 		return nil, err
 	}
