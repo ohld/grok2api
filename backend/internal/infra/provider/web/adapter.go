@@ -29,6 +29,7 @@ type Config struct {
 	AllowNSFW                bool
 	FreeVideoDurationCap     int
 	VideoNodeSpacing         time.Duration
+	VideoNodeConcurrency     int
 }
 
 type Adapter struct {

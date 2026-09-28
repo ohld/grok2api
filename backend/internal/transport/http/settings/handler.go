@@ -85,6 +85,8 @@ type providerWebConfigDTO struct {
 	MediaConcurrency        int     `json:"mediaConcurrency"`
 	AllowNSFW               bool    `json:"allowNSFW"`
 	FreeVideoDurationCap    *int    `json:"freeVideoDurationCap,omitempty"`
+	VideoNodeSpacing        *string `json:"videoNodeSpacing,omitempty"`
+	VideoNodeConcurrency    *int    `json:"videoNodeConcurrency,omitempty"`
 	RecoveryBackoffBase     string  `json:"recoveryBackoffBase"`
 	RecoveryBackoffMax      string  `json:"recoveryBackoffMax"`
 }
@@ -208,6 +210,9 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 			FreeVideoDurationCap:         intValue(value.ProviderWeb.FreeVideoDurationCap),
 			FreeVideoDurationCapProvided: value.ProviderWeb.FreeVideoDurationCap != nil,
+			VideoNodeSpacing:             optionalString(value.ProviderWeb.VideoNodeSpacing),
+			VideoNodeConcurrency:         intValue(value.ProviderWeb.VideoNodeConcurrency),
+			VideoPacingProvided:          value.ProviderWeb.VideoNodeSpacing != nil && value.ProviderWeb.VideoNodeConcurrency != nil,
 			RecoveryBackoffBase:          value.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: value.ProviderWeb.RecoveryBackoffMax,
 		},
 		ProviderConsole: settingsapp.ProviderConsoleConfig{
@@ -292,7 +297,8 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				VideoTimeout:     config.ProviderWeb.VideoTimeout,
 				MediaConcurrency: config.ProviderWeb.MediaConcurrency, AllowNSFW: config.ProviderWeb.AllowNSFW,
 				FreeVideoDurationCap: intPointer(config.ProviderWeb.FreeVideoDurationCap),
-				RecoveryBackoffBase:  config.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: config.ProviderWeb.RecoveryBackoffMax,
+				VideoNodeSpacing:     stringPointer(config.ProviderWeb.VideoNodeSpacing), VideoNodeConcurrency: intPointer(config.ProviderWeb.VideoNodeConcurrency),
+				RecoveryBackoffBase: config.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: config.ProviderWeb.RecoveryBackoffMax,
 			},
 			ProviderConsole: providerConsoleConfigDTO{
 				BaseURL: config.ProviderConsole.BaseURL, ChatTimeout: config.ProviderConsole.ChatTimeout,
