@@ -356,6 +356,8 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 		FreeVideoDurationCap: settingsdomain.NormalizeWebFreeVideoDurationCap(freeVideoDurationCap),
 		RecoveryBackoffBase:  config.Duration(value.ProviderWeb.RecoveryBackoffBase), RecoveryBackoffMax: config.Duration(value.ProviderWeb.RecoveryBackoffMax),
+		// Not a runtime setting yet: keep the file/default value across reloads.
+		VideoNodeSpacing: base.Provider.Web.VideoNodeSpacing,
 	}
 	if value.ProviderWeb.StreamIdleTimeout <= 0 {
 		base.Provider.Web.StreamIdleTimeout = config.Duration(settingsdomain.DefaultWebStreamIdleTimeout)

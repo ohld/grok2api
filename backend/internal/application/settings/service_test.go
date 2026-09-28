@@ -101,6 +101,9 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	if reloaded.Server.MaxConcurrentRequests != 2048 || reloaded.Provider.Build.ResponseHeaderTimeout.Value() != 7*time.Minute || reloaded.Routing.MaxAttempts != 5 || !reloaded.Routing.PreferFreeBuild || !reloaded.Routing.SegmentedSelectorEnabled || reloaded.Routing.SegmentedMinCandidates != 5000 || reloaded.Routing.SegmentedWindowSize != 96 || reloaded.Audit.BufferSize != input.Audit.BufferSize || reloaded.Media.MaxTotalBytes != 2<<30 || reloaded.Media.CleanupThresholdPercent != 75 || reloaded.Batch.SyncConcurrency != 28 || reloaded.Batch.RandomDelay.Value() != 750*time.Millisecond || reloaded.Provider.Console.BaseURL != "https://console.example.com" || reloaded.Provider.Web.ClearanceMode != config.ClearanceModeOnDemand {
 		t.Fatalf("configuration was not persisted")
 	}
+	if reloaded.Provider.Web.VideoNodeSpacing.Value() == 0 || reloaded.Provider.Web.VideoNodeSpacing != cfg.Provider.Web.VideoNodeSpacing {
+		t.Fatalf("Web video node spacing was dropped on reload: %s", reloaded.Provider.Web.VideoNodeSpacing.Value())
+	}
 }
 
 func TestUpdateRejectsBuildResponseHeaderTimeoutOutsideSafeRange(t *testing.T) {
