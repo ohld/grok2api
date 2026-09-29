@@ -312,6 +312,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		if status == http.StatusTooManyRequests || (err == nil && response.StatusCode == http.StatusTooManyRequests) {
 			// The IP is throttled: retries should try other nodes, not hammer this one.
 			pace.backoff(webVideoThrottleBackoff)
+			// Poking a throttled IP keeps it throttled (node 32: ~1 h on 2026-09-29);
+			// cooling the node also stops routing new jobs to its accounts.
+			a.egress.CoolNode(context.WithoutCancel(ctx), lease.NodeID, webVideoThrottleCooldown)
 		}
 	}
 	if err != nil {
@@ -666,6 +669,12 @@ func (t *videoPaceTicket) started() { t.didStart = true }
 // webVideoThrottleBackoff delays the next start on a node after Grok 429s it.
 // ponytail: fixed penalty; make it a runtime setting if one minute is wrong.
 var webVideoThrottleBackoff = time.Minute
+
+// webVideoThrottleCooldown keeps a 429'd node out of routing. Observed Grok
+// IP throttles last 20-60 min; after this the next job re-tests the IP and a
+// repeat 429 cools it again.
+// ponytail: fixed; make it a runtime setting if 15 minutes proves wrong.
+var webVideoThrottleCooldown = 15 * time.Minute
 
 // backoff holds the node's next start at least d from now.
 func (t *videoPaceTicket) backoff(d time.Duration) {

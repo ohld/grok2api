@@ -839,7 +839,9 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 未配置代理地址", boundNodeID))
 			}
 			proxyPool := m.isProxyPoolNode(selected)
-			if !qualityProbe && !proxyPool && selected.CooldownUntil != nil && now.Before(*selected.CooldownUntil) {
+			// An IP-throttle cooldown only steers routing; bound work (video
+			// download, statsig) on that node must still get its lease.
+			if !qualityProbe && !proxyPool && selected.CooldownUntil != nil && now.Before(*selected.CooldownUntil) && selected.LastError != LastErrorIPThrottle {
 				if !waitedForProbe && selected.LastError == domain.LastErrorTransport {
 					completed, waitErr := m.waitForFailureProbe(ctx, boundNodeID)
 					if waitErr != nil {
@@ -1668,6 +1670,9 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	now := time.Now().UTC()
 	var stale []requestClient
 	switch {
+	case succeeded && value.LastError == LastErrorIPThrottle && value.CooldownUntil != nil && now.Before(*value.CooldownUntil):
+		// Videos started before the throttle still finish; that does not lift it.
+		return
 	case succeeded:
 		value.Health = min(1, value.Health+0.1)
 		value.FailureCount = 0
@@ -1738,6 +1743,39 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 			m.scheduleFailureProbe(value)
 		}
 	}
+}
+
+// LastErrorIPThrottle marks a CoolNode cooldown; request successes keep it.
+const LastErrorIPThrottle = "ip throttle"
+
+// CoolNode takes a node out of account routing until d from now, so new work
+// lands on other IPs; leases for accounts already bound to it still work.
+// Proxy pools rotate IPs and are never cooled for one upstream verdict.
+func (m *Manager) CoolNode(ctx context.Context, nodeID uint64, d time.Duration) {
+	if nodeID == 0 || d <= 0 {
+		return
+	}
+	value, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil || m.isProxyPoolNode(value) {
+		return
+	}
+	until := time.Now().UTC().Add(d)
+	if value.CooldownUntil != nil && value.CooldownUntil.After(until) {
+		return
+	}
+	if stateRepository, ok := m.repository.(egressStateRepository); ok {
+		err = stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, &until, LastErrorIPThrottle)
+	} else {
+		value.CooldownUntil, value.LastError = &until, LastErrorIPThrottle
+		_, err = m.repository.UpdateEgressNode(ctx, value)
+	}
+	if err != nil {
+		return
+	}
+	m.nodeMu.Lock()
+	delete(m.healthyNodes, nodeID)
+	m.nodeMu.Unlock()
+	m.invalidateNodes(value.Scope)
 }
 
 func (m *Manager) cachedNodeIsHealthy(nodeID uint64) bool {

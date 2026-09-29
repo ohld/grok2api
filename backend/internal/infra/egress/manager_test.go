@@ -1572,6 +1572,37 @@ func TestFixedProxyTransportFailureStillCreatesCooldown(t *testing.T) {
 	}
 }
 
+func TestCoolNodeSetsCooldownExceptProxyPool(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedProxy, err := cipher.Encrypt("http://127.0.0.1:18888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "fixed", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy}}
+	manager := NewManager(repository, cipher)
+	manager.CoolNode(context.Background(), 1, 15*time.Minute)
+	if repository.node.CooldownUntil == nil || time.Until(*repository.node.CooldownUntil) < 14*time.Minute || repository.node.LastError != LastErrorIPThrottle || repository.node.Health != 1 {
+		t.Fatalf("fixed node not cooled: %#v", repository.node)
+	}
+	lease, _, err := manager.acquire(context.Background(), domain.ScopeWeb, "", false, "", 1)
+	if err != nil || lease == nil {
+		t.Fatalf("bound lease (video download) blocked by the throttle cooldown: %v", err)
+	}
+	lease.Release()
+	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 1, http.StatusOK, nil)
+	if repository.node.CooldownUntil == nil {
+		t.Fatal("in-flight success lifted the IP throttle cooldown")
+	}
+	pool := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "pool", Scope: domain.ScopeWeb, Enabled: true, ProxyPool: true, Health: 1}}
+	NewManager(pool, nil).CoolNode(context.Background(), 1, 15*time.Minute)
+	if pool.updates != 0 || pool.node.CooldownUntil != nil {
+		t.Fatalf("proxy pool cooled: %#v", pool.node)
+	}
+}
+
 func TestQualityProbeCanUseDisabledCoolingBoundNode(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
