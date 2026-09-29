@@ -216,18 +216,19 @@ func decodeImagineQuotaSnapshot(body []byte, accountID uint64, now time.Time) ([
 		if windowSeconds <= 0 {
 			return nil, fmt.Errorf("Grok Web Imagine 配额字段 %s 的 windowSizeSeconds 无效", item.field)
 		}
-		var resetAt *time.Time
-		if product.NextAvailableAt != nil {
-			value := product.NextAvailableAt.UTC()
-			resetAt = &value
-		} else {
-			// Imagine exposes the quota-window length but omits its anchor while
-			// the product is available. Match Web chat quota semantics by using
-			// the observation time as the rolling prediction anchor; every sync
-			// replaces this estimate, while an explicit nextAvailableAt wins.
-			value := now.Add(time.Duration(windowSeconds) * time.Second)
-			resetAt = &value
+		// Imagine exposes the quota-window length but omits its anchor while
+		// the product is available, so the observation time is the rolling
+		// prediction anchor. Measured 2026-09-29 on free video_720p: the window
+		// reopens exactly windowSizeSeconds after the generation finished, while
+		// nextAvailableAt reports that moment + 1 h. The post-job refresh runs
+		// seconds after the finish, so now+window is the real reset; keep the
+		// earlier of the two. A recovery probe that still sees 0 reschedules to
+		// upstream's nextAvailableAt, so an early estimate costs one probe.
+		value := now.Add(time.Duration(windowSeconds) * time.Second)
+		if product.NextAvailableAt != nil && product.NextAvailableAt.Before(value) {
+			value = product.NextAvailableAt.UTC()
 		}
+		resetAt := &value
 		windows = append(windows, account.QuotaWindow{
 			AccountID: accountID, Mode: item.mode, Remaining: remaining, Total: 0,
 			WindowSeconds: windowSeconds, ResetAt: resetAt, SyncedAt: &now,

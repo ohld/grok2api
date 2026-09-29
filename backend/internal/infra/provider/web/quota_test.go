@@ -531,8 +531,30 @@ func TestDecodeImagineQuotaSnapshotMatchesObservedProtocol(t *testing.T) {
 	if windows[0].Mode != account.QuotaModeWebImagePro || windows[0].Remaining != 2 || windows[0].Total != 0 || windows[0].ResetAt == nil || !windows[0].ResetAt.Equal(wantResetAt) {
 		t.Fatalf("image_pro = %#v", windows[0])
 	}
-	if windows[1].Mode != account.QuotaModeWebVideo720p || windows[1].Remaining != 0 || windows[1].Total != 0 || windows[1].ResetAt == nil || !windows[1].ResetAt.Equal(videoResetAt) {
+	// nextAvailableAt (04:47) is later than now+window (04:00): the window
+	// keeps the earlier prediction, see decodeImagineQuotaSnapshot.
+	if videoResetAt.Before(wantResetAt) {
+		t.Fatalf("fixture must keep nextAvailableAt after now+window")
+	}
+	if windows[1].Mode != account.QuotaModeWebVideo720p || windows[1].Remaining != 0 || windows[1].Total != 0 || windows[1].ResetAt == nil || !windows[1].ResetAt.Equal(wantResetAt) {
 		t.Fatalf("video_720p = %#v", windows[1])
+	}
+}
+
+func TestDecodeImagineQuotaSnapshotCapsNextAvailableAtToWindow(t *testing.T) {
+	// Free video_720p: upstream reports nextAvailableAt = finish + 25 h but the
+	// quota reopens at finish + 24 h (measured 2026-09-29, accounts 357/359/824).
+	now := time.Date(2026, 9, 29, 22, 24, 49, 0, time.UTC)
+	body := []byte(`{
+		"image":null,"imageEdit":null,"imagePro":null,"video":null,
+		"video720p":{"available":true,"remainingQueries":0,"windowSizeSeconds":86400,"nextAvailableAt":"` + now.Add(25*time.Hour).Format(time.RFC3339) + `"}
+	}`)
+	windows, err := decodeImagineQuotaSnapshot(body, 42, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 1 || windows[0].ResetAt == nil || !windows[0].ResetAt.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("windows = %#v", windows)
 	}
 }
 
