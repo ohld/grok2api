@@ -537,6 +537,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	attemptPolicy := s.videoAttemptPolicy()
 	excluded := make(map[uint64]bool)
 	forbiddenEgressRetried := make(map[uint64]bool)
+	// Web 429 is an IP throttle: skip every account on that node for this job.
+	throttledNodes := make(map[uint64]bool)
 	var retryPinnedAccountID uint64
 	failureAttempts := newFailureAttemptRecorder(http.MethodPost, "/videos/generations")
 	var selection *selectionSession
@@ -568,6 +570,11 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		if lease == nil {
 			if selection == nil {
 				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, jobScope)
+			}
+			if err == nil {
+				for nodeID := range throttledNodes {
+					selection.excludeEgressNode(nodeID)
+				}
 			}
 			if err == nil {
 				lease, err = selection.Acquire(ctx, excluded, false)
@@ -672,6 +679,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 				failureHandled = true
 				retriableCreate = safeCreateFailure && !account.IsBuildSuper(lease.Credential, lease.Billing)
 			case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
+				if status == http.StatusTooManyRequests && lease.Credential.Provider == account.ProviderWeb && lease.Credential.EgressNodeID != 0 {
+					throttledNodes[lease.Credential.EgressNodeID] = true
+				}
 				state, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
 				s.applyRateLimitReconciliation(failureCtx, lease.Credential, status, 0, state, reconcileErr)
 				failureHandled = true
