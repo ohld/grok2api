@@ -218,6 +218,8 @@ type Service struct {
 	mediaWorker                 int
 	mediaInputSlots             chan struct{}
 	mediaQueueFull              atomic.Uint64
+	videoDecoyOnce              sync.Once
+	videoDecoyRegistry          *videoDecoyRegistry
 	logger                      *slog.Logger
 	rateLimitMu                 sync.Mutex
 	rateLimitActive             atomic.Bool
