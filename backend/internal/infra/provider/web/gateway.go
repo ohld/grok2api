@@ -349,7 +349,16 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 // event, next to parent_response_id. Splitting the turn into item.create +
 // response.create kept text working but the model never saw the uploads.
 func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) map[string]any {
-	chunks := []any{map[string]any{"text": map[string]any{"text": prompt}}}
+	// Captured from grok.com on 2026-09-30 (real composer, image attached):
+	// each upload is a mention chunk {"mention":{"file_mention":{"file_id":id}}}
+	// (no "target" level) before the text chunk, and the same ids repeat in
+	// file_attachment_ids on the event. Without the mention chunk the model
+	// answers "no image".
+	chunks := make([]any, 0, len(attachments)+1)
+	for _, attachment := range attachments {
+		chunks = append(chunks, map[string]any{"mention": map[string]any{"file_mention": map[string]any{"file_id": attachment}}})
+	}
+	chunks = append(chunks, map[string]any{"text": map[string]any{"text": prompt}})
 	item := map[string]any{
 		"type": "message", "role": "user",
 		"x_grok": map[string]any{"client_message_id": newRequestUUID(), "input_chunks": chunks},
