@@ -62,14 +62,14 @@ func TestGatewayTurnEventsOmitCastleAndPreserveAttachments(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(encoded)
-	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"text":{"text":"hello"}`} {
+	// Shape captured from the real grok.com composer (2026-09-30): the mention
+	// chunk has no "target" level and precedes the text chunk.
+	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"input_chunks":[{"mention":{"file_mention":{"file_id":"file-1"}}},{"text":{"text":"hello"}}]`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("turn JSON %s missing %s", text, expected)
 		}
 	}
-	// The grok.com client never sends a file_mention chunk for an upload, nor a
-	// separate conversation.item.create.
-	for _, forbidden := range []string{"file_mention", "conversation.item.create", "castle_request_token"} {
+	for _, forbidden := range []string{`"target"`, "conversation.item.create", "castle_request_token"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("turn JSON %s must not contain %s", text, forbidden)
 		}
