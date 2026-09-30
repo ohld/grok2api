@@ -59,14 +59,27 @@ func TestGatewayTurnEventsOmitCastleAndPreserveAttachments(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(encoded)
-	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"file_mention":{"file_id":"file-1"}`, `"text":{"text":"hello"}`} {
+	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"text":{"text":"hello"}`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("item JSON %s missing %s", text, expected)
 		}
 	}
+	// The grok.com client never sends a file_mention chunk for an upload.
+	if strings.Contains(text, "file_mention") {
+		t.Fatalf("item JSON %s must not contain file_mention", text)
+	}
 	responseJSON, _ := json.Marshal(response)
 	if strings.Contains(string(responseJSON), "castle_request_token") {
 		t.Fatalf("response.create unexpectedly contains Castle token: %s", responseJSON)
+	}
+	// The client puts the upload ids on response.create; that is what makes the
+	// model see the image.
+	if !strings.Contains(string(responseJSON), `"file_attachment_ids":["file-1"]`) {
+		t.Fatalf("response.create %s missing file_attachment_ids", responseJSON)
+	}
+	_, bare := gatewayTurnEvents("conversation-1", "hello", nil, nil)
+	if bareJSON, _ := json.Marshal(bare); strings.Contains(string(bareJSON), "file_attachment_ids") {
+		t.Fatalf("response.create without uploads must omit file_attachment_ids: %s", bareJSON)
 	}
 }
 

@@ -343,12 +343,13 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 	return map[string]any{"model": model, "x_grok": xGrok}
 }
 
+// gatewayTurnEvents mirrors the grok.com client (bundle 2026-09-30): uploads
+// travel as file_attachment_ids on the response.create event, and the
+// input_chunks hold only text. A file_mention chunk is a different, flag-gated
+// feature (ENABLE_FILE_MENTIONS); sending it for an upload left the model
+// answering "no image" while the request still returned 200.
 func gatewayTurnEvents(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) (map[string]any, map[string]any) {
-	chunks := make([]any, 0, len(attachments)+1)
-	for _, attachment := range attachments {
-		chunks = append(chunks, map[string]any{"mention": map[string]any{"target": map[string]any{"file_mention": map[string]any{"file_id": attachment}}}})
-	}
-	chunks = append(chunks, map[string]any{"text": map[string]any{"text": prompt}})
+	chunks := []any{map[string]any{"text": map[string]any{"text": prompt}}}
 	item := map[string]any{
 		"type": "message", "role": "user",
 		"x_grok": map[string]any{"client_message_id": newRequestUUID(), "input_chunks": chunks},
@@ -372,6 +373,9 @@ func gatewayTurnEvents(sessionID, prompt string, attachments []string, previous 
 	responseEvent := map[string]any{
 		"session_id": sessionID,
 		"event":      map[string]any{"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", now)},
+	}
+	if len(attachments) > 0 {
+		responseEvent["event"].(map[string]any)["file_attachment_ids"] = attachments
 	}
 	return itemEvent, responseEvent
 }
