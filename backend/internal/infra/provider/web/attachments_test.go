@@ -55,3 +55,13 @@ type staticImageResolver struct {
 func (r staticImageResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
 	return append([]netip.Addr(nil), r.addresses...), nil
 }
+
+func TestDecodeChatFileUploadResponsePrefersMetadataID(t *testing.T) {
+	uploaded, err := decodeChatFileUploadResponse([]byte(`{"fileMetadataId":"meta-1","fileId":"file-1","fileUri":"users/u/f.png"}`))
+	if err != nil || uploaded.ID != "meta-1" || uploaded.MetadataID != "meta-1" || uploaded.URI == "" {
+		t.Fatalf("uploaded = %#v err = %v", uploaded, err)
+	}
+	if _, err := decodeChatFileUploadResponse([]byte(`{"uploadId":"task-1"}`)); err == nil {
+		t.Fatal("an async upload id is not a chat attachment reference")
+	}
+}
