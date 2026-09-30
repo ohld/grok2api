@@ -17,7 +17,10 @@ type ModelSpec struct {
 
 var catalog = []ModelSpec{
 	{PublicID: "grok-chat-fast", UpstreamModel: "grok-chat-fast", Capability: modeldomain.CapabilityChat, Mode: "fast", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-chat-auto", UpstreamModel: "grok-chat-auto", Capability: modeldomain.CapabilityChat, Mode: "auto", MinimumTier: account.WebTierSuper},
+	// Basic accounts carry a real `auto` window (rest/rate-limits: total 7 or 20),
+	// so the router's per-account quota fencing covers them; the Super gate dated
+	// from the Go rewrite and was never re-checked against the quota shape.
+	{PublicID: "grok-chat-auto", UpstreamModel: "grok-chat-auto", Capability: modeldomain.CapabilityChat, Mode: "auto", MinimumTier: account.WebTierBasic},
 	{PublicID: "grok-chat-expert", UpstreamModel: "grok-chat-expert", Capability: modeldomain.CapabilityChat, Mode: "expert", MinimumTier: account.WebTierSuper},
 	{PublicID: "grok-chat-heavy", UpstreamModel: "grok-chat-heavy", Capability: modeldomain.CapabilityChat, Mode: "heavy", MinimumTier: account.WebTierHeavy},
 	// Lite keeps the distinct fast/chat product name. Imagine WebSocket models
