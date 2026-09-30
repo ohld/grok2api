@@ -350,31 +350,30 @@ func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 	var uploadUserAgent string
 	server := fhttptest.NewServer(fhttp.HandlerFunc(func(writer fhttp.ResponseWriter, request *fhttp.Request) {
 		switch request.URL.Path {
-		case "/http/upload-file-v2/direct":
+		case "/rest/app-chat/upload-file":
+			// The grok.com composer uploads chat attachments here (JSON, base64
+			// content) and gets the fileMetadataId back synchronously.
 			uploadUserAgent = request.Header.Get("User-Agent")
 			if !strings.Contains(request.Header.Get("Cookie"), "sso=test-sso") {
 				t.Errorf("upload cookie = %q", request.Header.Get("Cookie"))
 			}
-			if err := request.ParseMultipartForm(2 << 20); err != nil {
-				t.Errorf("multipart: %v", err)
+			var upload struct {
+				FileName     string `json:"fileName"`
+				FileMimeType string `json:"fileMimeType"`
+				Content      string `json:"content"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&upload); err != nil {
+				t.Errorf("upload body: %v", err)
 				writer.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			file, header, err := request.FormFile("file")
-			if err != nil {
-				t.Errorf("file part: %v", err)
-				writer.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			defer file.Close()
-			content, _ := io.ReadAll(file)
-			if header.Filename != "image.png" || header.Header.Get("Content-Type") != "image/png" || len(content) == 0 || request.FormValue("file_source") != "" {
-				t.Errorf("upload filename=%q content-type=%q bytes=%d source=%q", header.Filename, header.Header.Get("Content-Type"), len(content), request.FormValue("file_source"))
+			if upload.FileName != "image.png" || upload.FileMimeType != "image/png" || upload.Content == "" {
+				t.Errorf("upload = %#v", upload)
 			}
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(writer, `{"uploadId":"upload_1","fileMetadata":{"fileMetadataId":"file_meta_1","fileUri":"users/test/file_meta_1/content"}}`)
-		case "/rest/app-chat/upload-file":
-			t.Error("不应调用旧版 Base64 上传接口")
+			_, _ = io.WriteString(writer, `{"fileMetadataId":"file_meta_1","fileUri":"users/test/file_meta_1/content"}`)
+		case "/http/upload-file-v2/direct":
+			t.Error("chat attachments must use /rest/app-chat/upload-file; v2/direct is only the fallback")
 			writer.WriteHeader(http.StatusInternalServerError)
 		case "/ws/mgw/":
 			if request.Header.Get("User-Agent") != uploadUserAgent {

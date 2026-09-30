@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -90,7 +91,7 @@ func (a *Adapter) prepareChatAttachments(ctx context.Context, cfg Config, lease 
 	}
 	attachments := make([]string, 0, len(pending))
 	for _, file := range pending {
-		uploaded, err := a.uploadFileV2Direct(ctx, cfg, lease, token, file, cfg.BaseURL+"/", "", "chat_attachment_upload")
+		uploaded, err := a.uploadChatFile(ctx, cfg, lease, token, file)
 		if err != nil {
 			return nil, err
 		}
@@ -100,6 +101,72 @@ func (a *Adapter) prepareChatAttachments(ctx context.Context, cfg Config, lease 
 		attachments = append(attachments, uploaded.ID)
 	}
 	return attachments, nil
+}
+
+// uploadChatFile uploads a chat attachment the way the grok.com composer does
+// (bundle 2026-09-30): JSON POST /rest/app-chat/upload-file, which answers with
+// the fileMetadataId the gateway expects in file_attachment_ids. The multipart
+// /http/upload-file-v2/direct path can answer with only an async uploadId,
+// which the gateway then silently ignores ("no image" with a 200). v2 stays
+// as the fallback if the JSON endpoint disappears.
+func (a *Adapter) uploadChatFile(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput) (uploadedFile, error) {
+	payload := map[string]any{"fileName": file.Filename, "fileMimeType": file.MIMEType, "content": base64.StdEncoding.EncodeToString(file.Data)}
+	response, err := a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/upload-file", payload, time.Minute, cfg.BaseURL+"/")
+	if err != nil {
+		return uploadedFile{}, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, webMediaDiagnosticBodyLimit+1))
+	_ = response.Body.Close()
+	if readErr != nil {
+		return uploadedFile{}, fmt.Errorf("读取上传附件响应: %w", readErr)
+	}
+	truncated := len(body) > webMediaDiagnosticBodyLimit
+	if truncated {
+		body = body[:webMediaDiagnosticBodyLimit]
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		upstreamErr := newWebMediaUpstreamError(response.StatusCode, body, truncated)
+		a.logWebMediaUpstreamRejection("chat_attachment_upload", response, upstreamErr)
+		switch response.StatusCode {
+		case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusGone, http.StatusNotImplemented:
+			uploaded, fallbackErr := a.uploadFileV2Direct(ctx, cfg, lease, token, file, cfg.BaseURL+"/", "", "chat_attachment_upload_v2")
+			if fallbackErr == nil {
+				a.log().Warn("chat_attachment_upload_fallback_v2", "status", response.StatusCode, "metadata_id", uploaded.MetadataID != "")
+			}
+			return uploaded, fallbackErr
+		}
+		return uploadedFile{}, upstreamErr
+	}
+	uploaded, err := decodeChatFileUploadResponse(body)
+	if err != nil {
+		return uploadedFile{}, err
+	}
+	a.log().Info("chat_attachment_uploaded", "metadata_id", uploaded.MetadataID != "", "bytes", len(file.Data), "mime", file.MIMEType)
+	return uploaded, nil
+}
+
+func decodeChatFileUploadResponse(body []byte) (uploadedFile, error) {
+	var value struct {
+		FileMetadataID string `json:"fileMetadataId"`
+		FileID         string `json:"fileId"`
+		FileURI        string `json:"fileUri"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		return uploadedFile{}, fmt.Errorf("上传附件响应无效: %w", err)
+	}
+	metadataID := strings.TrimSpace(value.FileMetadataID)
+	fileID := metadataID
+	if fileID == "" {
+		fileID = strings.TrimSpace(value.FileID)
+	}
+	fileURI := ""
+	if value.FileURI != "" {
+		fileURI = absoluteAssetURL(value.FileURI)
+	}
+	if fileID == "" {
+		return uploadedFile{}, fmt.Errorf("上传附件成功但上游未返回 fileMetadataId")
+	}
+	return uploadedFile{ID: fileID, MetadataID: metadataID, URI: fileURI}, nil
 }
 
 func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input string, maxBytes int64) (provider.ImageInput, error) {
