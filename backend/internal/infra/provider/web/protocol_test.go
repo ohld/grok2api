@@ -410,6 +410,9 @@ func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 				t.Errorf("read response.create: value=%#v err=%v", create, err)
 				return
 			}
+			if createAttachments, _ := create["event"].(map[string]any)["file_attachment_ids"].([]any); len(createAttachments) != 1 || createAttachments[0] != "file_meta_1" {
+				t.Errorf("response.create file_attachment_ids = %#v", create["event"].(map[string]any)["file_attachment_ids"])
+			}
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.chunk", "chunk": map[string]any{"text": map[string]any{"text": "seen", "channel": "CHANNEL_ASSISTANT_RESPONSE"}}}})
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.done", "response": map[string]any{"id": "parent_1", "status": "completed"}}})
 		default:
