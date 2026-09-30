@@ -49,37 +49,34 @@ func TestGatewaySessionSupportsNewAndExistingConversations(t *testing.T) {
 
 func TestGatewayTurnEventsOmitCastleAndPreserveAttachments(t *testing.T) {
 	previous := &inferencedomain.WebResponseState{UpstreamParentResponseID: "response-1"}
-	item, response := gatewayTurnEvents("conversation-1", "hello", []string{"file-1"}, previous)
-	itemEvent := item["event"].(map[string]any)
-	if item["session_id"] != "conversation-1" || itemEvent["parent_response_id"] != "response-1" {
-		t.Fatalf("item event = %#v", item)
+	turn := gatewayTurnEvent("conversation-1", "hello", []string{"file-1"}, previous)
+	event := turn["event"].(map[string]any)
+	if turn["session_id"] != "conversation-1" || event["type"] != "response.create" || event["parent_response_id"] != "response-1" {
+		t.Fatalf("turn event = %#v", turn)
 	}
-	encoded, err := json.Marshal(item)
+	if _, hasItem := event["item"].(map[string]any); !hasItem {
+		t.Fatalf("response.create must carry the item inline: %#v", event)
+	}
+	encoded, err := json.Marshal(turn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(encoded)
 	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"text":{"text":"hello"}`} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("item JSON %s missing %s", text, expected)
+			t.Fatalf("turn JSON %s missing %s", text, expected)
 		}
 	}
-	// The grok.com client never sends a file_mention chunk for an upload.
-	if strings.Contains(text, "file_mention") {
-		t.Fatalf("item JSON %s must not contain file_mention", text)
+	// The grok.com client never sends a file_mention chunk for an upload, nor a
+	// separate conversation.item.create.
+	for _, forbidden := range []string{"file_mention", "conversation.item.create", "castle_request_token"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("turn JSON %s must not contain %s", text, forbidden)
+		}
 	}
-	responseJSON, _ := json.Marshal(response)
-	if strings.Contains(string(responseJSON), "castle_request_token") {
-		t.Fatalf("response.create unexpectedly contains Castle token: %s", responseJSON)
-	}
-	// The client puts the upload ids on response.create; that is what makes the
-	// model see the image.
-	if !strings.Contains(string(responseJSON), `"file_attachment_ids":["file-1"]`) {
-		t.Fatalf("response.create %s missing file_attachment_ids", responseJSON)
-	}
-	_, bare := gatewayTurnEvents("conversation-1", "hello", nil, nil)
-	if bareJSON, _ := json.Marshal(bare); strings.Contains(string(bareJSON), "file_attachment_ids") {
-		t.Fatalf("response.create without uploads must omit file_attachment_ids: %s", bareJSON)
+	bare := gatewayTurnEvent("conversation-1", "hello", nil, nil)
+	if bareJSON, _ := json.Marshal(bare); strings.Contains(string(bareJSON), "file_attachment_ids") || strings.Contains(string(bareJSON), "parent_response_id") {
+		t.Fatalf("fresh turn without uploads must omit file_attachment_ids and parent_response_id: %s", bareJSON)
 	}
 }
 
