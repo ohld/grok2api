@@ -297,11 +297,7 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 		}
 		if created && attached && !turnSent {
 			turnSent = true
-			item, response := gatewayTurnEvents(currentSessionID, prompt, attachments, previous)
-			if err := sender.write(item); err != nil {
-				return fmt.Errorf("发送 Grok Gateway conversation.item.create: %w", err)
-			}
-			if err := sender.write(response); err != nil {
+			if err := sender.write(gatewayTurnEvent(currentSessionID, prompt, attachments, previous)); err != nil {
 				return fmt.Errorf("发送 Grok Gateway response.create: %w", err)
 			}
 		}
@@ -348,36 +344,26 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 // input_chunks hold only text. A file_mention chunk is a different, flag-gated
 // feature (ENABLE_FILE_MENTIONS); sending it for an upload left the model
 // answering "no image" while the request still returned 200.
-func gatewayTurnEvents(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) (map[string]any, map[string]any) {
+// The client sends the whole turn as ONE response.create with the item inline
+// (no separate conversation.item.create); file_attachment_ids sits on the
+// event, next to parent_response_id. Splitting the turn into item.create +
+// response.create kept text working but the model never saw the uploads.
+func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) map[string]any {
 	chunks := []any{map[string]any{"text": map[string]any{"text": prompt}}}
 	item := map[string]any{
 		"type": "message", "role": "user",
 		"x_grok": map[string]any{"client_message_id": newRequestUUID(), "input_chunks": chunks},
 	}
-	if len(attachments) > 0 {
-		item["file_attachment_ids"] = attachments
-	}
-	now := time.Now().UnixMilli()
-	itemEvent := map[string]any{
-		"session_id": sessionID,
-		"event": map[string]any{
-			"type": "conversation.item.create", "event_id": fmt.Sprintf("evt_msg_%d", now), "item": item,
-		},
+	event := map[string]any{
+		"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", time.Now().UnixMilli()), "item": item,
 	}
 	if previous != nil {
-		itemEvent["event"].(map[string]any)["parent_response_id"] = previous.UpstreamParentResponseID
+		event["parent_response_id"] = previous.UpstreamParentResponseID
 	}
 	if len(attachments) > 0 {
-		itemEvent["event"].(map[string]any)["file_attachment_ids"] = attachments
+		event["file_attachment_ids"] = attachments
 	}
-	responseEvent := map[string]any{
-		"session_id": sessionID,
-		"event":      map[string]any{"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", now)},
-	}
-	if len(attachments) > 0 {
-		responseEvent["event"].(map[string]any)["file_attachment_ids"] = attachments
-	}
-	return itemEvent, responseEvent
+	return map[string]any{"session_id": sessionID, "event": event}
 }
 
 func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string, error) {
