@@ -648,6 +648,13 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		if err == nil && result.AssetID == "" && result.URL != "" {
 			result, err = s.persistRemoteVideo(ctx, job.ID, adapter, lease.Credential, result)
 		}
+		if err == nil && result.ContentHash != "" {
+			s.logger.Info("video_content_hash", "job_id", job.ID, "account_id", lease.Credential.ID, "hash", result.ContentHash)
+			if decoyJob, decoy := s.videoDecoys().Observe(result.ContentHash, job.ID, job.Prompt); decoy {
+				s.logger.Warn("video_decoy_detected", "job_id", job.ID, "account_id", lease.Credential.ID, "node_id", lease.Credential.EgressNodeID, "same_as_job", decoyJob, "hash", result.ContentHash)
+				err = errVideoDecoy
+			}
+		}
 		if err == nil {
 			break
 		}
@@ -664,7 +671,14 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		stage, hasStage := provider.VideoErrorStage(err)
 		safeCreateFailure := hasStage && stage == provider.VideoStageCreate
 		status, hasStatus := provider.ErrorHTTPStatus(err)
-		if errors.Is(err, provider.ErrUnauthorized) {
+		if errors.Is(err, errVideoDecoy) {
+			// The account is degraded and its daily clip is already spent; move the
+			// job to another account instead of shipping the stock clip.
+			s.selector.MarkFailure(failureCtx, lease.Credential, 0, 0)
+			excluded[lease.Credential.ID] = true
+			failureHandled = true
+			retriableCreate = true
+		} else if errors.Is(err, provider.ErrUnauthorized) {
 			if lease.Credential.AuthType == account.AuthTypeSSO {
 				s.markSSOCredentialRejected(failureCtx, lease.Credential, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
 			}
@@ -736,6 +750,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 				failureCode, publicErr = "provider_unavailable", errors.New("上游服务暂不可用")
 			} else if hasStatus && status == http.StatusTooManyRequests {
 				failureCode = "rate_limited"
+			} else if errors.Is(err, errVideoDecoy) {
+				failureCode = "decoy_video"
 			}
 			s.failVideoJob(parent, job, failureCode, publicErr, upstreamStatus, failureAttempts.snapshot())
 			return
@@ -957,11 +973,13 @@ func (s *Service) persistRemoteVideo(ctx context.Context, jobID string, adapter 
 		if downloadErr != nil {
 			lastErr = provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, downloadErr)
 		} else {
-			asset, saveErr := s.mediaAssets.SaveVideo(ctx, jobID, contentType, body)
+			hasher := newMdatHasher()
+			asset, saveErr := s.mediaAssets.SaveVideo(ctx, jobID, contentType, io.TeeReader(body, hasher))
 			_ = body.Close()
 			if saveErr == nil {
 				result.AssetID = asset.ID
 				result.ContentType = asset.MIMEType
+				result.ContentHash = hasher.Fingerprint()
 				return result, nil
 			}
 			lastErr = provider.NewMediaPostProcessingError(provider.MediaPostProcessingStorage, saveErr)

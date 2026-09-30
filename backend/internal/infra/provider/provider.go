@@ -584,6 +584,9 @@ type VideoResult struct {
 	ContentType string
 	// A non-empty AssetID means the result is stored as a local media asset; content reads must use MediaObjectStorage.
 	AssetID string
+	// ContentHash fingerprints the stored clip's video payload (MP4 mdat SHA256);
+	// empty when the content was not archived locally or did not parse.
+	ContentHash string
 }
 
 type TTSOutputFormat struct {
