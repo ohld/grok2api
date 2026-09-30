@@ -259,7 +259,10 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	imageURL := strings.TrimSpace(request.ImageURL)
 	referenceURLs := trimNonEmpty(request.ReferenceURLs)
-	if imageURL != "" && len(referenceURLs) > 0 {
+	// image + exactly one reference only reaches here as the first+last-frame
+	// pair (gateway VideoInput.LastFrameURL); the public API rejects the combination.
+	lastFrame := imageURL != "" && len(referenceURLs) == 1
+	if imageURL != "" && len(referenceURLs) > 0 && !lastFrame {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("image 不能与 reference_images 同时使用"))
 	}
 	cfg := a.config()
@@ -289,7 +292,10 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	mediaKey := ""
 	rawAssets := referenceURLs
-	if imageURL != "" {
+	if lastFrame {
+		mediaKey = "firstLastFrame"
+		rawAssets = []string{imageURL, referenceURLs[0]}
+	} else if imageURL != "" {
 		mediaKey = "imageToVideo"
 		rawAssets = []string{imageURL}
 	} else if len(referenceURLs) > 0 {
@@ -748,6 +754,17 @@ func videoCreatePayload(prompt, ratio, resolution string, seconds int, inputAsse
 			"aspectRatio":    ratio,
 			"duration":       seconds,
 			"resolutionName": resolution,
+		}
+	case "firstLastFrame":
+		// grok.com "First frame" + "Last frame" roles (observed 2026-09-27):
+		// referenceToVideo with the two assets named instead of inputAssets.
+		media["referenceToVideo"] = map[string]any{
+			"prompt":          prompt,
+			"firstFrameAsset": inputAssets[0],
+			"lastFrameAsset":  inputAssets[1],
+			"aspectRatio":     ratio,
+			"duration":        seconds,
+			"resolutionName":  resolution,
 		}
 	default:
 		media["textToVideo"] = map[string]any{

@@ -52,6 +52,11 @@ type VideoInput struct {
 	Resolution  string
 	// ImageURL is the optional first-frame image (official "image").
 	ImageURL string
+	// LastFrameURL pairs with ImageURL for a first+last-frame clip (Web
+	// referenceToVideo). It is stored as the job's only reference_url next to
+	// image_url; that pair is rejected on every other path, so downstream it can
+	// only mean first+last frame.
+	LastFrameURL string
 	// ReferenceURLs are style/content references (official "reference_images").
 	ReferenceURLs []string
 	// ReferenceAudios are preset voice_ids for reference-to-video.
@@ -82,6 +87,12 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		hasRefAudio := len(input.ReferenceAudios) > 0
 		if hasImage && (hasRefs || hasRefAudio) {
 			return media.Job{}, fmt.Errorf("image 不能与 reference_images/reference_audios 同时使用")
+		}
+		if lastFrame := strings.TrimSpace(input.LastFrameURL); lastFrame != "" {
+			if !hasImage || hasRefs || hasRefAudio {
+				return media.Job{}, fmt.Errorf("last_frame 需要 image，且不能与 reference_images/reference_audios 同时使用")
+			}
+			input.ReferenceURLs = []string{lastFrame}
 		}
 		if hasRefs || hasRefAudio {
 			if len(input.Prompt) == 0 {
@@ -240,6 +251,11 @@ func validateVideoRouteParameters(providerValue account.Provider, operation prov
 	}
 	trimmedModel := strings.TrimSpace(upstreamModel)
 	hasReferences := referenceCount > 0
+	// image + one reference is the first+last-frame pair (VideoInput.LastFrameURL);
+	// only Web's referenceToVideo carries it.
+	if hasImage && hasReferences && providerValue != account.ProviderWeb {
+		return fmt.Errorf("%w: last_frame 仅支持 Web 视频路由", ErrVideoOperationUnsupported)
+	}
 	if providerValue == account.ProviderConsole && (trimmedModel == "grok-imagine-video" || trimmedModel == "grok-imagine-video-1.5") {
 		// 实测：8 张 reference_images 上游回 400
 		// "Too many reference images: 8. Maximum allowed is 7."（两个视频模型一致）。
