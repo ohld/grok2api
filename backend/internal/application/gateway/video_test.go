@@ -194,6 +194,13 @@ func TestVideoRouteParametersRejectConsoleReferenceLimits(t *testing.T) {
 	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video", "720p", false, 1, 10); err != nil {
 		t.Fatalf("base model 10s reference error = %v", err)
 	}
+	// image + one reference is the first+last-frame pair; only Web carries it.
+	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video", "720p", true, 1, 6); !errors.Is(err, ErrVideoOperationUnsupported) {
+		t.Fatalf("console last_frame error = %v", err)
+	}
+	if err := validateVideoRouteParameters(account.ProviderWeb, provider.VideoOperationGenerate, "grok-imagine-video", "720p", true, 1, 6); err != nil {
+		t.Fatalf("web last_frame error = %v", err)
+	}
 	// image-to-video（无 reference_images）与 1.5 都保持 15s。
 	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video", "720p", true, 0, 15); err != nil {
 		t.Fatalf("base model text/first-frame 15s error = %v", err)

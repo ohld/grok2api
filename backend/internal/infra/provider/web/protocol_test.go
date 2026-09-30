@@ -1708,6 +1708,24 @@ func TestReferenceToVideoPayloadMatchesCapturedMediaGenInputShape(t *testing.T) 
 	}
 }
 
+// grok.com "First frame" + "Last frame" roles: referenceToVideo names the two
+// assets instead of listing them in inputAssets.
+func TestVideoCreatePayloadFirstLastFrame(t *testing.T) {
+	ids := []string{"first-asset", "last-asset"}
+	payload := videoCreatePayload("slow push in", "9:16", "720p", 6, ids, "firstLastFrame")
+	referenceToVideo, ok := payload["mediaGenInput"].(map[string]any)["referenceToVideo"].(map[string]any)
+	if !ok || referenceToVideo["firstFrameAsset"] != "first-asset" || referenceToVideo["lastFrameAsset"] != "last-asset" ||
+		referenceToVideo["prompt"] != "slow push in" || referenceToVideo["duration"] != 6 || referenceToVideo["resolutionName"] != "720p" {
+		t.Fatalf("referenceToVideo = %#v", referenceToVideo)
+	}
+	if _, exists := referenceToVideo["inputAssets"]; exists {
+		t.Fatalf("first+last frame must not also send inputAssets: %#v", referenceToVideo)
+	}
+	if payload["enableSideBySide"] != false {
+		t.Fatalf("side-by-side would spend quota twice: %#v", payload["enableSideBySide"])
+	}
+}
+
 func TestGenerateVideoUploadsAssetsIntoCapturedMediaGenInput(t *testing.T) {
 	const tinyPNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	successBody := `{"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"post_1","videoUrl":"/videos/final.mp4"}}}}`
@@ -1822,8 +1840,10 @@ func TestGenerateVideoUploadsAssetsIntoCapturedMediaGenInput(t *testing.T) {
 
 func TestGenerateVideoRejectsCombinedImageAndReferenceAudios(t *testing.T) {
 	adapter := NewAdapter(Config{}, nil, nil, nil, nil)
+	// image + exactly one reference is the first+last-frame pair and goes on;
+	// anything more is still the forbidden image/reference_images mix.
 	_, err := adapter.GenerateVideo(context.Background(), provider.VideoRequest{
-		Prompt: "x", Duration: 6, ImageURL: "https://example.com/a.png", ReferenceURLs: []string{"https://example.com/b.png"},
+		Prompt: "x", Duration: 6, ImageURL: "https://example.com/a.png", ReferenceURLs: []string{"https://example.com/b.png", "https://example.com/c.png"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "不能与 reference_images") {
 		t.Fatalf("combined error = %v", err)
