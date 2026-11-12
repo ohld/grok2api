@@ -32,7 +32,9 @@
 > upstream repository are candidate patch sources only. They never replace the
 > running contract automatically: useful changes are reviewed, selectively
 > cherry-picked, and must pass the fork's routing, privacy, image-capacity, and
-> production canary gates.
+> production canary gates. On every upstream merge, re-run the
+> [upstream-blocker watchlist](UPSTREAM-WATCH.md) canaries and update
+> that file.
 
 ## Sponsors
 
