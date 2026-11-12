@@ -550,6 +550,29 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	quotaRefreshGroup := s.providers.QuotaRefreshGroup(route.Provider, route.UpstreamModel)
+	// The initial creation path (selectSchedulableEligibleMediaRouteWithQuotaMode,
+	// called from CreateVideoJob) always scopes account selection to the
+	// requesting client key's AccountScope. A retry here must not silently
+	// widen that: falling back to the unscoped account pool would let a key
+	// restricted to e.g. free-tier/web-only accounts consume a premium or
+	// console/build-only account's quota purely because its originally
+	// pinned account had a transient failure.
+	accountScope := clientkey.AccountScope{}
+	if job.ClientKeyID > 0 {
+		key, keyErr := s.clientKeys.Get(ctx, job.ClientKeyID)
+		if keyErr != nil {
+			if parent.Err() != nil {
+				s.deferVideoJob(parent, job)
+				return
+			}
+			s.failVideoJob(ctx, job, "client_key_unavailable", keyErr, 0, nil)
+			return
+		}
+		accountScope = key.AccountScope()
+	}
+	// The job's persisted routing cohort is authoritative over the key's
+	// current cohort, so a retry stays in the cohort the job was admitted to.
+	accountScope.RoutingCohort = jobScope.RoutingCohort
 	attemptPolicy := s.videoAttemptPolicy()
 	excluded := make(map[uint64]bool)
 	forbiddenEgressRetried := make(map[uint64]bool)
@@ -577,7 +600,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			pinnedAccountID = job.AccountID
 		}
 		if pinnedAccountID > 0 && !excluded[pinnedAccountID] {
-			lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, pinnedAccountID, route.ID, route.UpstreamModel, quotaMode, true, jobScope)
+			lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, pinnedAccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
 			if err != nil {
 				excluded[pinnedAccountID] = true
 				lease = nil
@@ -585,7 +608,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		if lease == nil {
 			if selection == nil {
-				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, jobScope)
+				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, accountScope)
 			}
 			if err == nil {
 				for nodeID := range throttledNodes {

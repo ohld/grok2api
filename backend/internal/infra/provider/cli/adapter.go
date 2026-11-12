@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,8 +67,13 @@ type Adapter struct {
 	fallbackMarker FallbackMarker
 	uploadIssuer   VideoUploadIssuer
 	replay         *reasoningreplay.ReasoningReplay
-	compaction     *gatewayCompactionCodec
-	logger         *slog.Logger
+	// conversationReasoningCache bridges Chat/Messages tool calls to the
+	// upstream Responses reasoning proof. It is deliberately separate from
+	// the persistent native Responses replay, and its keys never contain an
+	// account ID: encrypted reasoning is portable across Build accounts.
+	conversationReasoningCache *conversation.ReasoningCache
+	compaction                 *gatewayCompactionCodec
+	logger                     *slog.Logger
 }
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
@@ -80,7 +86,9 @@ func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	agentID := uuid.NewString()
 	adapter := &Adapter{
 		cfg: cfg, http: httpClient, cipher: cipher, base: transport,
-		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
+		agentID: agentID, modelsETags: make(map[uint64]string),
+		conversationReasoningCache: conversation.NewReasoningCache(0, 0),
+		compaction:                 newGatewayCompactionCodec(cipher), logger: slog.Default(),
 	}
 	adapter.oauth = newOAuthClient(httpClient, func() string { return adapter.config().ClientVersion })
 	return adapter
@@ -240,9 +248,16 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	var conversationOptions conversation.ResponseOptions
 	cacheRoute := buildPromptCacheRoute{}
 	compactionRequested := false
+	// Resolve the physical inference plane before normalization so Chat and
+	// Anthropic conversion can use the same scope for capture and restoration.
+	// The scope contains the trusted session seed, model, and plane only; it is
+	// intentionally independent of the selected account.
+	primaryBase := a.primaryBaseURL()
+	base := a.inferenceBaseForOperation(request.Credential, request.Billing, request.Method, request.Path)
+	conversationScope := a.conversationReasoningScope(request, base)
 	if request.NormalizeBody {
 		if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
-			body, conversationOptions, err = conversation.ConvertRequestWithOptions(body, request.Model, request.Operation)
+			body, conversationOptions, err = conversation.ConvertRequestWithReasoningReplay(body, request.Model, request.Operation, a.conversationReasoningCache, conversationScope)
 			if err == nil && conversationOptions.ReasoningEffortSet && request.NormalizedMetadata != nil {
 				request.NormalizedMetadata.ReasoningEffort = conversationOptions.ReasoningEffort
 			}
@@ -276,6 +291,8 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	}
 	if request.Operation == conversation.OperationMessages && conversationOptions.AnthropicWebSearch {
 		request.ReasoningReplayKey = ""
+		conversationScope = ""
+		conversationOptions = conversationOptions.WithReasoningReplay(nil, "")
 	}
 	if compactionRequested {
 		body, err = prepareGatewayCompactionSample(body)
@@ -312,11 +329,10 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		return a.forwardGatewayCompaction(ctx, request, accessToken, body, warnings)
 	}
 	// Explicit mode wins; in auto mode only confirmed Super accounts with bot_flag_source/bfs in {1,2} default to XAI.
-	primaryBase := a.primaryBaseURL()
-	base := a.inferenceBaseForOperation(request.Credential, request.Billing, request.Method, request.Path)
-	// Cache affinity and reasoning replay use separate identities. Replay is bound to the
-	// upstream plane (Build vs XAI) so a blob captured on one API is not injected onto the other.
-	// Encrypted reasoning is portable across accounts, so the cache key is not account-scoped.
+	// Prompt-cache affinity and reasoning replay use separate identities. The
+	// native Responses replay remains account-scoped, while the Chat/Messages
+	// bridge is scoped to the client session, model, and physical plane only;
+	// encrypted reasoning is portable across accounts on that plane.
 	replayBaseBody := body
 	body, replayKey := a.applyReasoningReplay(ctx, request, replayBaseBody, base)
 	call := a.doResponseRequest(ctx, request, accessToken, body, base)
@@ -372,6 +388,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 					a.activateBuildAPIFallback(ctx, &request.Credential)
 					call = fallbackCall
 					resp, reqURL, base, body, replayKey = call.response, call.upstreamURL, fallbackBase, fallbackBody, fallbackReplayKey
+					conversationOptions = conversationOptions.WithReasoningReplay(a.conversationReasoningCache, a.conversationReasoningScope(request, base))
 					reasoningRecovery = reasoningRecovery.merge(fallbackRecovery)
 				} else {
 					if fallbackErr == nil && fallbackCall.response != nil {
@@ -546,6 +563,20 @@ func (a *Adapter) scopedReasoningReplayKey(request provider.ResponseResourceRequ
 	return hex.EncodeToString(digest[:])
 }
 
+func (a *Adapter) conversationReasoningScope(request provider.ResponseResourceRequest, base string) string {
+	seed := strings.TrimSpace(request.ReasoningReplayKey)
+	model := strings.ToLower(strings.TrimSpace(request.Model))
+	if seed == "" || model == "" {
+		return ""
+	}
+	plane := "build"
+	if fallback := a.fallbackBaseURL(); fallback != "" && strings.EqualFold(strings.TrimRight(base, "/"), fallback) {
+		plane = "xai"
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("grok2api:conversation-reasoning:v1:%s:%s:%s", seed, model, plane)))
+	return hex.EncodeToString(digest[:])
+}
+
 func isCompactPath(path string) bool {
 	return strings.Contains(strings.ToLower(path), "compact")
 }
@@ -589,6 +620,9 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		return call
 	}
 	applyGrokTurnIndexHeader(req, request.GrokTurnIndex)
+	if request.TransientRetry > 0 {
+		req.Header.Set("x-grok-transient-retry", strconv.Itoa(request.TransientRetry))
+	}
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -780,6 +814,22 @@ type buildModelCatalogEntry struct {
 		ModelID string `json:"modelId"`
 		Hidden  bool   `json:"hidden"`
 	} `json:"_meta"`
+	// Reasoning and budget metadata, mirroring the keys grok-build reads in
+	// xai-grok-shell remote/client.rs parse_remote_model_value. Snake and camel
+	// case spellings are both accepted there, so both are accepted here.
+	ContextWindow            int64  `json:"context_window"`
+	ContextWindowCamel       int64  `json:"contextWindow"`
+	MaxCompletionTokens      int64  `json:"max_completion_tokens"`
+	MaxCompletionTokensCamel int64  `json:"maxCompletionTokens"`
+	ReasoningEffort          string `json:"reasoning_effort"`
+	ReasoningEffortCamel     string `json:"reasoningEffort"`
+	SupportsReasoningEffort  *bool  `json:"supports_reasoning_effort"`
+	SupportsReasoningCamel   *bool  `json:"supportsReasoningEffort"`
+	SupportsBackendSearch    bool   `json:"supports_backend_search"`
+	// reasoning_efforts entries are either bare strings ("high") or objects
+	// {value,id,label,description,default}; decode lazily per entry.
+	ReasoningEfforts      []json.RawMessage `json:"reasoning_efforts"`
+	ReasoningEffortsCamel []json.RawMessage `json:"reasoningEfforts"`
 }
 
 // modelIdentifier keeps the legacy top-level id authoritative and uses the
@@ -791,6 +841,81 @@ func (e buildModelCatalogEntry) modelIdentifier() string {
 		return ""
 	}
 	return firstNonEmpty(e.ID, e.Model, e.ModelID, e.Meta.Model, e.Meta.ModelID)
+}
+
+// reasoningMenu decodes reasoning_efforts the way grok-build's
+// parse_reasoning_effort_options does: each entry is a bare effort string or an
+// object with a required `value`; unreadable entries are skipped instead of
+// discarding the whole menu. It returns the ordered values and the entry
+// flagged default (empty when none is flagged).
+func (e buildModelCatalogEntry) reasoningMenu() (values []string, defaultValue string) {
+	raw := e.ReasoningEfforts
+	if len(raw) == 0 {
+		raw = e.ReasoningEffortsCamel
+	}
+	for _, entry := range raw {
+		var bare string
+		if err := json.Unmarshal(entry, &bare); err == nil {
+			if bare = strings.TrimSpace(bare); bare != "" {
+				values = append(values, bare)
+			}
+			continue
+		}
+		var option struct {
+			Value   string `json:"value"`
+			Default bool   `json:"default"`
+		}
+		if err := json.Unmarshal(entry, &option); err != nil {
+			continue
+		}
+		value := strings.TrimSpace(option.Value)
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+		if option.Default && defaultValue == "" {
+			defaultValue = value
+		}
+	}
+	return values, defaultValue
+}
+
+// upstreamProfile projects the catalog entry onto the domain profile.
+func (e buildModelCatalogEntry) upstreamProfile() modeldomain.UpstreamModelProfile {
+	menu, menuDefault := e.reasoningMenu()
+	supports := false
+	switch {
+	case e.SupportsReasoningEffort != nil:
+		supports = *e.SupportsReasoningEffort
+	case e.SupportsReasoningCamel != nil:
+		supports = *e.SupportsReasoningCamel
+	}
+	contextWindow := e.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = e.ContextWindowCamel
+	}
+	maxCompletion := e.MaxCompletionTokens
+	if maxCompletion <= 0 {
+		maxCompletion = e.MaxCompletionTokensCamel
+	}
+	return modeldomain.UpstreamModelProfile{
+		ReasoningEfforts:        menu,
+		DefaultReasoningEffort:  firstNonEmpty(menuDefault, e.ReasoningEffort, e.ReasoningEffortCamel),
+		SupportsReasoningEffort: supports,
+		ContextWindow:           clampInt(contextWindow),
+		MaxCompletionTokens:     clampInt(maxCompletion),
+		SupportsBackendSearch:   e.SupportsBackendSearch,
+	}
+}
+
+func clampInt(value int64) int {
+	if value <= 0 {
+		return 0
+	}
+	if value > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(value)
 }
 
 func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credential, accessToken, base string) ([]string, int, error) {
@@ -839,6 +964,9 @@ func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credentia
 		}
 		seen[identifier] = struct{}{}
 		models = append(models, identifier)
+		// Publish the live reasoning menu / context budget so effort validation,
+		// aliases, and catalog output follow the upstream catalog like grok-build does.
+		modeldomain.RegisterUpstreamModelProfile(identifier, item.upstreamProfile())
 	}
 	a.recordModelsETag(credential.ID, resp.Header.Get("ETag"))
 	return models, resp.StatusCode, nil
@@ -1004,6 +1132,9 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 		if sessionID != "" {
 			req.Header.Set("x-grok-session-id", sessionID)
 			req.Header.Set("x-grok-conv-id", sessionID)
+			// grok-build derives x-grok-conv-group-id from the root session so the
+			// proxy can group a root conversation with its subagent descendants.
+			req.Header.Set("x-grok-conv-group-id", grokConversationGroupID(sessionID))
 		}
 		req.Header.Set("x-grok-req-id", requestID)
 		// The gateway cannot reliably recover the CLI prompt index from a stateless API request.
@@ -1048,6 +1179,17 @@ func grokSessionID(promptCacheKey string) (string, error) {
 		return parsed.String(), nil
 	}
 	return uuid.NewHash(sha256.New(), uuid.NameSpaceURL, []byte("grok2api:session:"+key), 8).String(), nil
+}
+
+// grokConversationGroupIDNamespace mirrors xai-grok-shell `CONVERSATION_GROUP_NAMESPACE`.
+const grokConversationGroupIDNamespace = "xai:grok-build:conversation-group:"
+
+// grokConversationGroupID reproduces grok-build `derive_conversation_group_id`:
+// UUIDv5(NAMESPACE_OID, namespace + root_session_id). The gateway treats each
+// stable session as its own root conversation, so the group id derives from the
+// same session id sent as x-grok-conv-id.
+func grokConversationGroupID(rootSessionID string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(grokConversationGroupIDNamespace+rootSessionID)).String()
 }
 
 func injectPromptCacheKey(body []byte, clientKey string) ([]byte, error) {
