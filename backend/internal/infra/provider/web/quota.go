@@ -137,6 +137,9 @@ func (a *Adapter) SyncQuotaGroup(ctx context.Context, credential account.Credent
 	if err != nil {
 		return provider.QuotaGroupSnapshot{}, err
 	}
+	if zero := zeroImagineProducts(body, windows); len(zero) > 0 {
+		a.logger.Info("web_imagine_quota_zero", "account_id", credential.ID, "products", diagnosticExcerpt(zero))
+	}
 	return provider.QuotaGroupSnapshot{
 		Group: account.QuotaGroupWebImagine, Modes: account.WebImagineQuotaModes(), Windows: windows, SyncedAt: now,
 	}, nil

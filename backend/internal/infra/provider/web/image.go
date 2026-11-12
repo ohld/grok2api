@@ -752,6 +752,7 @@ func (a *Adapter) generateWSImageAttempt(ctx context.Context, request provider.I
 		}
 		if message["type"] == "error" {
 			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
+			a.logger.Warn("web_imagine_ws_error", "account_id", request.Credential.ID, "frame", diagnosticExcerpt(message))
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
 			return nil, upstreamErr
 		}
@@ -1573,6 +1574,7 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 		}
 		if message["type"] == "error" {
 			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
+			a.logger.Warn("web_imagine_ws_error", "account_id", credential.ID, "frame", diagnosticExcerpt(message))
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
 			_ = writer.CloseWithError(upstreamErr)
 			return
