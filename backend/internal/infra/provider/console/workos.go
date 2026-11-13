@@ -207,8 +207,12 @@ func (a *Adapter) loginWorkOS(ctx context.Context, ssoToken string, lease *infra
 		request.Header.Set("Sec-Fetch-Mode", "navigate")
 		request.Header.Set("Sec-Fetch-Site", "none")
 		cookies := cookieHeaderFor(jar, target)
-		if strings.EqualFold(target.Host, base.Host) {
-			cookies = joinCookieHeaders(infraegress.BuildSSOCookie(ssoToken, lease.CFCookies), cookies)
+		if sendsWorkOSSSO(target, base.Host) {
+			cfCookies := lease.CFCookies // grok.com zone only; accounts.x.ai has its own
+			if !strings.EqualFold(target.Host, base.Host) {
+				cfCookies = ""
+			}
+			cookies = joinCookieHeaders(infraegress.BuildSSOCookie(ssoToken, cfCookies), cookies)
 		}
 		if cookies != "" {
 			request.Header.Set("Cookie", cookies)
@@ -371,6 +375,13 @@ func joinCookieHeaders(values ...string) string {
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+// sendsWorkOSSSO limits the SSO cookie to xAI's own hosts. The dashboard login
+// now authorises on accounts.x.ai; without sso there it lands on sign-in (200)
+// and the exchange never returns WorkOS cookies. Cursor/WorkOS never get it.
+func sendsWorkOSSSO(target *url.URL, sessionHost string) bool {
+	return strings.EqualFold(target.Host, sessionHost) || (target.Scheme == "https" && strings.EqualFold(target.Host, "accounts.x.ai"))
 }
 
 // isAllowedWorkOSHost bounds the redirect chain to the hosts the Grok/Cursor
