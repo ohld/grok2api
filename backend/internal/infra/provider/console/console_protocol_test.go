@@ -750,3 +750,19 @@ func TestConsoleQuotaScopeAcceptsConsoleAndWebNodes(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkOSSSOCookieOnlyForXAIHosts(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://grok.com/dashboard/api/auth/login": true,
+		"https://accounts.x.ai/sign-in":             true,
+		"http://accounts.x.ai/sign-in":              false,
+		"https://authenticator.cursor.sh/":          false,
+		"https://api.workos.com/user_management":    false,
+		"https://evil.accounts.x.ai.example/":       false,
+	} {
+		target, _ := url.Parse(raw)
+		if got := sendsWorkOSSSO(target, "grok.com"); got != want {
+			t.Errorf("sendsWorkOSSSO(%s) = %v, want %v", raw, got, want)
+		}
+	}
+}
