@@ -208,7 +208,11 @@ func (a *Adapter) loginWorkOS(ctx context.Context, ssoToken string, lease *infra
 		request.Header.Set("Sec-Fetch-Site", "none")
 		cookies := cookieHeaderFor(jar, target)
 		if sendsWorkOSSSO(target, base.Host) {
-			cookies = joinCookieHeaders(infraegress.BuildSSOCookie(ssoToken, lease.CFCookies), cookies)
+			cfCookies := lease.CFCookies // grok.com zone only; accounts.x.ai has its own
+			if !strings.EqualFold(target.Host, base.Host) {
+				cfCookies = ""
+			}
+			cookies = joinCookieHeaders(infraegress.BuildSSOCookie(ssoToken, cfCookies), cookies)
 		}
 		if cookies != "" {
 			request.Header.Set("Cookie", cookies)
