@@ -257,7 +257,8 @@ func (a *Adapter) loginWorkOS(ctx context.Context, ssoToken string, lease *infra
 		if _, _, sessionErr := a.fetchCursorMerged(ctx, ssoToken, lease); errors.Is(sessionErr, provider.ErrUnauthorized) {
 			return workosSession{}, fmt.Errorf("%w: Grok SSO 会话已失效（unauthenticated）", provider.ErrUnauthorized)
 		}
-		return workosSession{}, fmt.Errorf("%w (status %d)", errConsoleWorkOSMissing, status)
+		// Host and path only (never the query): shows where the chain stopped.
+		return workosSession{}, fmt.Errorf("%w (status %d at hop %d %s%s)", errConsoleWorkOSMissing, status, hop, target.Host, target.Path)
 	}
 	return workosSession{}, fmt.Errorf("Console WorkOS 跳转次数超过 %d", workosMaxRedirects)
 }
