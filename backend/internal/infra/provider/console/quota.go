@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	consoleQuotaScope   = egressdomain.ScopeConsole
 	consoleQuotaTimeout = 45 * time.Second
 	// consoleWeeklyWindow is INCLUDED_USAGE_PERIOD_WEEKLY; the exact reset
 	// instant comes from resetsAt and is aligned to account creation.
@@ -59,9 +60,10 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, consoleQuotaTimeout)
 	defer cancel()
-	// The dashboard is served by grok.com, so it shares the Web scope's exit,
-	// browser fingerprint and Clearance, exactly like the Session identity sync.
-	lease, err := a.egress.AcquireCredential(requestCtx, egressdomain.ScopeWeb, credential)
+	// The dashboard is served by grok.com. Console scope still gets grok.com
+	// Clearance and accepts Web nodes, but unlike Web scope it also honours a
+	// Console-bound egress node; ScopeWeb rejected every Console-bound account.
+	lease, err := a.egress.AcquireCredential(requestCtx, consoleQuotaScope, credential)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -79,12 +81,12 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 			return nil, time.Time{}, &egressBlockedError{retryAfter: delay}
 		}
 		if !errors.Is(err, provider.ErrUnauthorized) {
-			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeWeb, lease.NodeID, 0, err)
+			a.egress.FeedbackForScope(context.WithoutCancel(ctx), consoleQuotaScope, lease.NodeID, 0, err)
 		}
 		return nil, time.Time{}, err
 	}
 	a.breaker.reset(lease.NodeID)
-	a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeWeb, lease.NodeID, http.StatusOK, nil)
+	a.egress.FeedbackForScope(context.WithoutCancel(ctx), consoleQuotaScope, lease.NodeID, http.StatusOK, nil)
 	now := time.Now().UTC()
 	return consoleQuotaWindows(credential.ID, usage, now), now, nil
 }

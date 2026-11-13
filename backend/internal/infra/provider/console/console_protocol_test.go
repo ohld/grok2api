@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -737,5 +738,15 @@ func TestParseConsoleUsageStatusBoundsIntegers(t *testing.T) {
 	}
 	if status, err := parseConsoleUsageStatus([]byte(`{"weeklyIncludedUsage":{"budgetCents":"100","usedCents":37.0}}`)); err != nil || status.BudgetCents != 100 || status.UsedCents != 37 {
 		t.Fatalf("string/float cents = %#v, %v", status, err)
+	}
+}
+
+// Regression: v3.1.8 synced quota via ScopeWeb, so every account bound to a
+// Console egress node failed with "作用域不兼容" and kept a stale zero quota.
+func TestConsoleQuotaScopeAcceptsConsoleAndWebNodes(t *testing.T) {
+	for _, node := range []egressdomain.Scope{egressdomain.ScopeConsole, egressdomain.ScopeWeb} {
+		if !egressdomain.SupportsScope(node, consoleQuotaScope) {
+			t.Fatalf("%s node rejected for Console quota sync", node)
+		}
 	}
 }
