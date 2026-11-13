@@ -80,7 +80,9 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 			}
 			return nil, time.Time{}, &egressBlockedError{retryAfter: delay}
 		}
-		if !errors.Is(err, provider.ErrUnauthorized) {
+		// A 200 login page without WorkOS cookies is an upstream flow problem,
+		// not a broken exit: penalising the node would cool down Console routing.
+		if !errors.Is(err, provider.ErrUnauthorized) && !errors.Is(err, errConsoleWorkOSMissing) {
 			a.egress.FeedbackForScope(context.WithoutCancel(ctx), consoleQuotaScope, lease.NodeID, 0, err)
 		}
 		return nil, time.Time{}, err
